@@ -2,6 +2,7 @@
 
 import sys
 import os
+from pathlib import Path
 from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QDialog, QFontComboBox,QTextEdit, QInputDialog,
                                 QLineEdit, QMenu, QMessageBox,QProgressBar, QToolBar,
@@ -9,7 +10,8 @@ from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QHeaderView, QHBoxLayout, QSplitter)
 from PySide6.QtGui import (QAction, QGuiApplication, QIcon, QKeySequence, QStandardItemModel,
                             QStandardItem, QImage, QPixmap)
-from PySide6.QtCore import (QUrl, Qt, Slot, Signal, QDir, QEvent)
+from PySide6.QtCore import (QUrl, Qt, Slot, Signal, QDir, QEvent, QThread,
+                            QCoreApplication)
 
 from PySide6.QtPrintSupport import (QAbstractPrintDialog, QPrinter,
                                     QPrintDialog, QPrintPreviewDialog)
@@ -26,9 +28,12 @@ import openpyxl
 
 from ui import ui_detectmain
 from camera import Camera
+from yolo_detection_worker import YoloDetectionWorker
 
 
 class DetectMain(QWidget):
+    detection_requested = Signal(str, str)
+
     def __init__(self):
         super().__init__()
         self.ui = ui_detectmain.Ui_Form()
@@ -207,6 +212,20 @@ class DetectMain(QWidget):
         except OSError:
             pass
 
+        self._detection_thread = QThread(self)
+        self._detection_worker = YoloDetectionWorker()
+        self._detection_worker.moveToThread(self._detection_thread)
+        self.detection_requested.connect(self._detection_worker.detect)
+        self._detection_worker.finished.connect(self._on_detection_finished)
+        self._detection_worker.failed.connect(self._on_detection_failed)
+        self._detection_thread.finished.connect(self._detection_worker.deleteLater)
+        self._detection_thread.start()
+
+        self.ui.pushButton.clicked.connect(self._select_detection_image)
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_detection_thread)
+
     CHANNEL_COLORS = {
         'Red':   '#d62728',
         'Green': '#2ca02c',
@@ -222,6 +241,71 @@ class DetectMain(QWidget):
     }
 
     IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
+
+    @Slot()
+    def _select_detection_image(self):
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select an image for detection",
+            "",
+            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
+        )
+        if not image_path:
+            return
+
+        repository_root = Path(__file__).resolve().parent.parent
+        weight_path = (
+            repository_root
+            / "HT-Detector_Peng"
+            / "weights"
+            / "cuvette_Peng"
+            / "yolov8n_train"
+            / "weights"
+            / "best.pt"
+        )
+        if not weight_path.is_file():
+            QMessageBox.critical(
+                self,
+                "Detection error",
+                "YOLO weight file was not found:\n{}".format(weight_path),
+            )
+            return
+
+        self.ui.pushButton.setEnabled(False)
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(0)
+        self.ui.progressBar.setRange(0, 0)
+        self.detection_requested.emit(image_path, str(weight_path))
+
+    @Slot(object, bool, str)
+    def _on_detection_finished(self, image, has_detections, message):
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(100)
+        self.ui.pushButton.setEnabled(True)
+
+        height, width, channels = image.shape
+        bytes_per_line = channels * width
+        qt_image = QImage(
+            image.data, width, height, bytes_per_line, QImage.Format_RGB888
+        ).rgbSwapped().copy()
+        self._recgPixmap = QPixmap.fromImage(qt_image)
+        self._scale_label(self.ui.labelRecgImg)
+
+        if not has_detections:
+            QMessageBox.information(self, "Detection", message)
+
+    @Slot(str)
+    def _on_detection_failed(self, message):
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(0)
+        self.ui.pushButton.setEnabled(True)
+        QMessageBox.critical(self, "Detection error", message)
+
+    @Slot()
+    def _shutdown_detection_thread(self):
+        if self._detection_thread.isRunning():
+            self._detection_thread.quit()
+            self._detection_thread.wait()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
