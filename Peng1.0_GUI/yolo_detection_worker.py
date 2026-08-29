@@ -1,53 +1,10 @@
-import importlib.util
 import math
 import numbers
-import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-
-def _load_project_interface():
-    repository_root = Path(__file__).resolve().parent.parent
-    interface_path = repository_root / "HT-Detector_Peng" / "interface.py"
-    if not interface_path.is_file():
-        raise RuntimeError(
-            "The HT-Detector_Peng interface module was not found: {}".format(
-                interface_path
-            )
-        )
-
-    existing_module = sys.modules.get("interface")
-    existing_file = getattr(existing_module, "__file__", None)
-    if existing_file:
-        try:
-            if Path(existing_file).resolve() == interface_path.resolve():
-                return existing_module
-        except (OSError, RuntimeError):
-            pass
-
-    spec = importlib.util.spec_from_file_location("interface", interface_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            "Could not create an import specification for: {}".format(interface_path)
-        )
-
-    module = importlib.util.module_from_spec(spec)
-    had_existing_module = "interface" in sys.modules
-    sys.modules["interface"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as error:
-        if had_existing_module:
-            sys.modules["interface"] = existing_module
-        else:
-            sys.modules.pop("interface", None)
-        raise RuntimeError(
-            "Failed to load HT-Detector_Peng interface module from {}: {}".format(
-                interface_path, error
-            )
-        ) from error
-    return module
+from interface_config import load_effective_settings
 
 
 def _box_center(box):
@@ -282,6 +239,51 @@ class YoloDetectionWorker(QObject):
         )
 
     @classmethod
+    def _draw_detection_label(cls, cv2, image, text, box_x0, box_y0, color):
+        image_height, image_width = image.shape[:2]
+        target_height = min(max(image_height * 0.025, 14.0), 64.0)
+        thickness = min(max(int(round(target_height / 12.0)), 1), 5)
+        probe = "cuvette 0.00"
+        probe_height = cv2.getTextSize(
+            probe, cv2.FONT_HERSHEY_SIMPLEX, 1.0, thickness
+        )[0][1]
+        scale = target_height / max(probe_height, 1)
+        calibrated_height = cv2.getTextSize(
+            probe, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+        )[0][1]
+        if calibrated_height > 0:
+            scale *= target_height / calibrated_height
+
+        (text_width, text_height), baseline = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+        )
+        outline_padding = thickness + 2
+        gap = max(2, thickness)
+        max_x = max(outline_padding, image_width - text_width - outline_padding)
+        x = min(max(int(box_x0), outline_padding), max_x)
+
+        outside_y = int(box_y0) - gap - baseline - outline_padding
+        if outside_y - text_height - outline_padding >= 0:
+            y = outside_y
+        else:
+            y = int(box_y0) + gap + outline_padding + text_height
+        min_y = text_height + outline_padding
+        max_y = max(min_y, image_height - baseline - outline_padding)
+        y = min(max(y, min_y), max_y)
+
+        cls._put_text(
+            cv2,
+            image,
+            text,
+            x,
+            y,
+            color,
+            scale=scale,
+            thickness=thickness,
+            outline=True,
+        )
+
+    @classmethod
     def _draw_text_block(cls, cv2, image, text_lines, anchor_x, preferred_top):
         texts = [text for text, _ in text_lines]
         layout = _text_layout(cv2, image.shape[0], texts)
@@ -319,21 +321,21 @@ class YoloDetectionWorker(QObject):
             )
         return start_x, start_top, layout
 
-    def _build_payload(self, result, interface_module, cv2):
+    def _build_payload(self, result, settings, cv2, config_warnings=None):
         import numpy as np
 
         original_bgr = result.orig_img
         if not isinstance(original_bgr, np.ndarray) or original_bgr.ndim != 3:
             raise RuntimeError("YOLO did not return a valid OpenCV source image.")
         annotated = original_bgr.copy()
-        warnings = []
+        warnings = list(config_warnings or [])
         targets = []
 
-        color_channel = str(interface_module.color_channel).strip().upper()
+        color_channel = settings["color_channel"]
         if color_channel not in {"R", "G", "B"}:
             raise RuntimeError("color_channel must be R, G, or B.")
         display_order, order_warning = _validated_display_order(
-            interface_module.Order_Con_R_G_B
+            settings["Order_Con_R_G_B"]
         )
         if order_warning:
             warnings.append(order_warning)
@@ -367,9 +369,11 @@ class YoloDetectionWorker(QObject):
             cv2.rectangle(annotated, (x0, y0), (x1, y1), (0, 255, 0), 2)
             class_name = result.names[class_id]
             label = str(class_name)
-            if bool(interface_module.show_confidence):
+            if settings["show_confidence"]:
                 label += " {:.2f}".format(float(confidence))
-            self._put_text(cv2, annotated, label, x0, max(18, y0 - 5), (0, 255, 0))
+            self._draw_detection_label(
+                cv2, annotated, label, x0, y0, (0, 255, 0)
+            )
 
         pairs, unmatched_cuvettes, unmatched_liquids = _pair_cuvettes_and_liquids(
             cuvettes, liquids
@@ -384,10 +388,10 @@ class YoloDetectionWorker(QObject):
 
         slope, intercept = self._load_formula(color_channel)
         ratios = (
-            interface_module.x0_ratio,
-            interface_module.y0_ratio,
-            interface_module.x1_ratio,
-            interface_module.y1_ratio,
+            settings["x0_ratio"],
+            settings["y0_ratio"],
+            settings["x1_ratio"],
+            settings["y1_ratio"],
         )
         rgb_colors = {"R": (0, 0, 255), "G": (0, 255, 0), "B": (255, 0, 0)}
         for number, (cuvette_box, liquid_box) in enumerate(pairs, start=1):
@@ -396,7 +400,7 @@ class YoloDetectionWorker(QObject):
                 red, green, blue, concentration = _calculate_measurement(
                     original_bgr,
                     roi,
-                    int(interface_module.rgb_calculate_accuracy),
+                    settings["rgb_calculate_accuracy"],
                     color_channel,
                     slope,
                     intercept,
@@ -424,11 +428,11 @@ class YoloDetectionWorker(QObject):
             )
 
             text_values = {
-                "R": round(red, int(interface_module.rgb_display_accuracy)),
-                "G": round(green, int(interface_module.rgb_display_accuracy)),
-                "B": round(blue, int(interface_module.rgb_display_accuracy)),
+                "R": round(red, settings["rgb_display_accuracy"]),
+                "G": round(green, settings["rgb_display_accuracy"]),
+                "B": round(blue, settings["rgb_display_accuracy"]),
             }
-            con_text = round(concentration, int(interface_module.con_display_accuracy))
+            con_text = round(concentration, settings["con_display_accuracy"])
             text_lines = [("No.{}".format(target_number), (255, 0, 255)),
                           ("Con.:{}".format(con_text), (255, 255, 0))]
             text_lines.extend(
@@ -456,7 +460,7 @@ class YoloDetectionWorker(QObject):
             import cv2
             import numpy as np
 
-            interface_module = _load_project_interface()
+            settings, config_warnings, _ = load_effective_settings()
             from ultralytics import YOLO
 
             encoded_path = np.fromfile(image_path, dtype=np.uint8)
@@ -471,14 +475,16 @@ class YoloDetectionWorker(QObject):
             results = self._model.predict(
                 source=source_image,
                 device="cpu",
-                conf=0.05,
+                conf=settings["detect_confidence"],
                 save=False,
                 verbose=False,
             )
             if not results:
                 raise RuntimeError("YOLO returned no result for the selected image.")
 
-            payload = self._build_payload(results[0], interface_module, cv2)
+            payload = self._build_payload(
+                results[0], settings, cv2, config_warnings=config_warnings
+            )
             self.finished.emit(payload)
         except Exception as error:
             self.failed.emit("{}: {}".format(type(error).__name__, error))

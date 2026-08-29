@@ -17,6 +17,7 @@ from ui import ui_detectwindow
 from ui import ui_detectfile
 from detectfile import DetectFile
 from detectmain import DetectMain
+from interface_settings_dialog import InterfaceSettingsDialog
 
 
 #RSRC_PATH = ":/images/mac" if sys.platform == 'darwin' else ":/images/win"
@@ -53,6 +54,12 @@ class DetectWindow(QMainWindow):
         self._detectFile.ui.dirTreeView.clicked.connect(self.onClickDir)
         self._detectFile.ui.fileListView.clicked.connect(self.onClickFile)
         self._detectFile.ui.extComboBox.textActivated.connect(self.onClickExt)
+
+        self._interface_settings_dialog = None
+        self._uiWindow.actionPreferences.setText("Interface")
+        self._uiWindow.actionPreferences.triggered.connect(
+            self._open_interface_settings
+        )
 
     @Slot(int)
     def onClickDir(self, index):
@@ -113,6 +120,20 @@ class DetectWindow(QMainWindow):
 
 #        self._uiWindow.actionAbout_Qt_Creator.triggered.connect(self.)
 #        self._uiWindow..triggered.connect(self.)
+
+    @Slot()
+    def _open_interface_settings(self):
+        if self._interface_settings_dialog is not None:
+            self._interface_settings_dialog.raise_()
+            self._interface_settings_dialog.activateWindow()
+            return
+        dialog = InterfaceSettingsDialog(self)
+        self._interface_settings_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._interface_settings_dialog = None
+            dialog.deleteLater()
 #        self._uiWindow..triggered.connect(self.)
 #        self._uiWindow..triggered.connect(self.)
 
