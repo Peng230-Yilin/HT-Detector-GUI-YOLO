@@ -65,6 +65,7 @@ class DetectMain(QWidget):
 #        self.figure = plt.figure()
         self.figure, self.ax = plt.subplots(figsize=(15,15), dpi=100)#nrows=1, ncols=1,figsize=(15,10))#figsize=(20,15))
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self._regression_suptitle = None
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.layout.addWidget(self.canvas)
 #        self.layout.addWidget(self.toolbar)
@@ -245,6 +246,7 @@ class DetectMain(QWidget):
         self.ui.pushButton_5.clicked.connect(self._select_calibration_image)
         self.ui.pushButton_4.clicked.connect(self._start_linear_regression)
         self.ui.pushButton.clicked.connect(self._select_detection_image)
+        self.ui.pushButton_7.clicked.connect(self._plot_regression_result)
         self._reset_calibration_ui()
         app = QCoreApplication.instance()
         if app is not None:
@@ -268,6 +270,7 @@ class DetectMain(QWidget):
 
     CALIBRATION_TABLE_HEADERS = ("No.", "Con.", "Red", "Green", "Blue")
     CALIBRATION_PLOT_PLACEHOLDER = "Run linear regression, then click Plot."
+    REGRESSION_CHANNEL_FIELDS = {"R": "Red", "G": "Green", "B": "Blue"}
 
     @staticmethod
     def _decode_calibration_image(image_path):
@@ -301,12 +304,10 @@ class DetectMain(QWidget):
         ).rgbSwapped().copy()
         return QPixmap.fromImage(qt_image)
 
-    def _clear_calibration_results(self):
-        self._regression_result = None
-        self._regression_dirty = False
-        self._populate_tableview(
-            self.ui.tabviewOrig, self.CALIBRATION_TABLE_HEADERS, []
-        )
+    def _show_calibration_plot_placeholder(self):
+        if self._regression_suptitle is not None:
+            self._regression_suptitle.remove()
+            self._regression_suptitle = None
         self.ax.clear()
         self.ax.text(
             0.5,
@@ -318,7 +319,128 @@ class DetectMain(QWidget):
         )
         self.ax.set_axis_off()
         self.canvas.draw()
+
+    def _clear_calibration_results(self):
+        self._regression_result = None
+        self._regression_dirty = False
+        self._populate_tableview(
+            self.ui.tabviewOrig, self.CALIBRATION_TABLE_HEADERS, []
+        )
+        self._show_calibration_plot_placeholder()
         self.ui.pushButton_7.setEnabled(False)
+        self.ui.pushButton_8.setEnabled(False)
+
+    def _regression_plot_data(self):
+        payload = self._regression_result
+        if not isinstance(payload, dict):
+            raise ValueError("No linear regression result is available.")
+
+        samples = payload.get("samples")
+        formulas = payload.get("formulas")
+        channel = payload.get("selected_channel")
+        if not isinstance(samples, (list, tuple)) or not samples:
+            raise ValueError("The regression result contains no samples.")
+        if channel not in self.REGRESSION_CHANNEL_FIELDS:
+            raise ValueError("The regression result has an invalid selected channel.")
+        if not isinstance(formulas, dict) or not isinstance(formulas.get(channel), dict):
+            raise ValueError("The regression formula for channel {} is missing.".format(channel))
+
+        formula = formulas[channel]
+        try:
+            slope = float(formula["slope"])
+            intercept = float(formula["intercept"])
+            r_squared = float(formula["R2"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("The regression formula is incomplete or invalid.") from error
+        if not all(np.isfinite(value) for value in (slope, intercept, r_squared)):
+            raise ValueError("The regression formula contains non-finite values.")
+
+        channel_field = self.REGRESSION_CHANNEL_FIELDS[channel]
+        plot_samples = []
+        for sample in samples:
+            if not isinstance(sample, dict):
+                raise ValueError("The regression result contains an invalid sample.")
+            try:
+                concentration = float(sample["Con."])
+                intensity = float(sample[channel_field])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    "A regression sample is missing valid concentration or {} data.".format(
+                        channel_field
+                    )
+                ) from error
+            if not np.isfinite(concentration) or not np.isfinite(intensity):
+                raise ValueError("A regression sample contains non-finite plot data.")
+            plot_samples.append((concentration, intensity, sample.get("included") is True))
+
+        included = [sample for sample in plot_samples if sample[2]]
+        if len(included) < 2 or len({sample[0] for sample in included}) < 2:
+            raise ValueError("At least two distinct included concentrations are required to plot.")
+        return channel, channel_field, plot_samples, included, slope, intercept, r_squared
+
+    def _has_valid_regression_result(self):
+        try:
+            self._regression_plot_data()
+        except ValueError:
+            return False
+        return True
+
+    @Slot()
+    def _plot_regression_result(self):
+        try:
+            (channel, channel_field, _plot_samples, included,
+             slope, intercept, r_squared) = self._regression_plot_data()
+        except ValueError as error:
+            self._show_calibration_plot_placeholder()
+            self.ui.pushButton_7.setEnabled(False)
+            self.ui.pushButton_8.setEnabled(False)
+            QMessageBox.critical(self, "Plot error", str(error))
+            return
+
+        used_x = [sample[0] for sample in included]
+        used_y = [sample[1] for sample in included]
+        color = self.CHANNEL_COLORS[channel_field]
+
+        self.ax.clear()
+        self.ax.set_axis_on()
+        self.ax.scatter(
+            used_x, used_y, color=color, marker="o", s=55,
+            label="Used in regression (n={})".format(len(included)), zorder=3,
+        )
+        line_x = np.array([min(used_x), max(used_x)], dtype=float)
+        line_y = slope * line_x + intercept
+        self.ax.plot(
+            line_x, line_y, color=color,
+            linewidth=2.2, label="Linear fit", zorder=2,
+        )
+        sign = "+" if intercept >= 0 else "-"
+        equation = "y = {:.4f}x {} {:.4f}".format(slope, sign, abs(intercept))
+        title = "Linear Regression – {} Channel\n{}    R² = {:.4f}".format(
+            channel_field, equation, r_squared
+        )
+        if self._regression_suptitle is None:
+            self._regression_suptitle = self.figure.suptitle(title, y=0.97)
+        else:
+            self._regression_suptitle.set_text(title)
+        self.figure.subplots_adjust(left=0.14, right=0.96, bottom=0.16, top=0.78)
+        self.ax.set_xlabel("Concentration")
+        self.ax.set_ylabel("{} Intensity".format(channel_field))
+        self.ax.grid(True, alpha=0.3)
+        self.ax.legend()
+
+        def padded_limits(values):
+            lower = float(min(values))
+            upper = float(max(values))
+            span = upper - lower
+            margin = span * 0.05 if span > 0 else max(abs(lower) * 0.05, 0.5)
+            return lower - margin, upper + margin
+
+        # Limits are rebuilt from the current included points and fit endpoints
+        # after every clear; excluded samples and previous axes state cannot affect them.
+        self.ax.set_xlim(padded_limits(list(used_x) + list(line_x)))
+        self.ax.set_ylim(padded_limits(list(used_y) + list(line_y)))
+        self.canvas.draw()
+        self.ui.pushButton_7.setEnabled(True)
         self.ui.pushButton_8.setEnabled(False)
 
     def _set_active_worker_task(self, task):
@@ -331,7 +453,9 @@ class DetectMain(QWidget):
             not busy and self._calibration_source_path is not None
         )
         self.ui.pushButton.setEnabled(not busy)
-        self.ui.pushButton_7.setEnabled(False)
+        self.ui.pushButton_7.setEnabled(
+            not busy and self._has_valid_regression_result()
+        )
         self.ui.pushButton_8.setEnabled(False)
 
     def _reset_calibration_ui(self):
