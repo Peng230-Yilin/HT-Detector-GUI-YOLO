@@ -1,5 +1,6 @@
 import math
 import numbers
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -85,8 +86,15 @@ def _calculate_rgb_roi(liquid_box, image_shape, ratios):
 
 
 def _calculate_measurement(original_bgr, roi, accuracy, channel, slope, intercept):
-    import numpy as np
+    red, green, blue = _calculate_rgb_averages(original_bgr, roi, accuracy)
+    values = {"R": red, "G": green, "B": blue}
+    concentration = (values[channel] - intercept) / slope
+    if not math.isfinite(concentration):
+        raise ValueError("The calculated concentration is not finite.")
+    return red, green, blue, concentration
 
+
+def _calculate_rgb_averages(original_bgr, roi, accuracy):
     x0, y0, x1, y1 = roi
     region_bgr = original_bgr[y0:y1, x0:x1]
     if region_bgr.size == 0:
@@ -96,11 +104,9 @@ def _calculate_measurement(original_bgr, roi, accuracy, channel, slope, intercep
     red, green, blue = (
         round(float(value), accuracy) for value in averages
     )
-    values = {"R": red, "G": green, "B": blue}
-    concentration = (values[channel] - intercept) / slope
-    if not math.isfinite(concentration):
-        raise ValueError("The calculated concentration is not finite.")
-    return red, green, blue, concentration
+    if not all(math.isfinite(value) for value in (red, green, blue)):
+        raise ValueError("The calculated RGB values are not finite.")
+    return red, green, blue
 
 
 def _validated_display_order(order):
@@ -141,14 +147,20 @@ def _text_layout(cv2, image_height, texts):
 class YoloDetectionWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
+    regression_finished = Signal(object)
+    regression_failed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._model = None
         self._weight_path = None
         self._formula_cache = {}
+        self._active_formulas = None
 
     def _load_formula(self, color_channel):
+        if self._active_formulas is not None:
+            formula = self._active_formulas[color_channel]
+            return formula["slope"], formula["intercept"]
         if color_channel in self._formula_cache:
             return self._formula_cache[color_channel]
 
@@ -194,6 +206,18 @@ class YoloDetectionWorker(QObject):
 
         self._formula_cache[color_channel] = (slope, intercept)
         return slope, intercept
+
+    def _get_model(self, weight_path):
+        if self._model is None or self._weight_path != weight_path:
+            from ultralytics import YOLO
+
+            self._model = YOLO(weight_path)
+            self._weight_path = weight_path
+        return self._model
+
+    @Slot()
+    def clear_active_formulas(self):
+        self._active_formulas = None
 
     @staticmethod
     def _class_ids(names):
@@ -454,6 +478,180 @@ class YoloDetectionWorker(QObject):
             warnings.append("No valid RGB measurements were produced.")
         return {"image": annotated, "targets": targets, "warnings": warnings}
 
+    @staticmethod
+    def _regression_formula(concentrations, values, channel):
+        import numpy as np
+        from scipy import stats
+
+        if len(concentrations) < 2:
+            raise ValueError("At least two included calibration points are required.")
+        if len(set(concentrations)) < 2:
+            raise ValueError("Included calibration concentrations must contain at least two distinct values.")
+        if not all(math.isfinite(value) for value in concentrations + values):
+            raise ValueError("{} regression inputs must all be finite.".format(channel))
+        try:
+            result = stats.linregress(concentrations, values)
+        except Exception as error:
+            raise ValueError("{} linear regression failed: {}".format(channel, error)) from error
+        formula = {
+            "slope": float(result.slope),
+            "intercept": float(result.intercept),
+            "r": float(result.rvalue),
+            "R2": float(result.rvalue * result.rvalue),
+            "p": float(result.pvalue),
+            "std_err": float(result.stderr),
+        }
+        if not all(np.isfinite(value) for value in formula.values()):
+            raise ValueError("{} linear regression produced a non-finite result.".format(channel))
+        if math.isclose(formula["slope"], 0.0, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(
+                "{} linear regression produced a zero or near-zero slope.".format(
+                    channel
+                )
+            )
+        return formula
+
+    def _build_regression_payload(
+        self, result, settings, cv2, source_path="", config_warnings=None
+    ):
+        import numpy as np
+
+        original_bgr = result.orig_img
+        if not isinstance(original_bgr, np.ndarray) or original_bgr.ndim != 3:
+            raise RuntimeError("YOLO did not return a valid OpenCV source image.")
+        annotated = original_bgr.copy()
+        warnings = list(config_warnings or [])
+        display_order, order_warning = _validated_display_order(
+            settings["Order_Con_R_G_B"]
+        )
+        if order_warning:
+            warnings.append(order_warning)
+
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
+            raise ValueError("Calibration failed: no cuvette or liquid boxes were detected.")
+        coordinates = boxes.xyxy.detach().cpu().numpy()
+        classes = boxes.cls.detach().cpu().numpy().astype(int)
+        confidences = boxes.conf.detach().cpu().numpy()
+        cuvette_id, liquid_id = self._class_ids(result.names)
+        cuvettes = []
+        liquids = []
+        for coordinates_xyxy, class_id, confidence in zip(
+            coordinates, classes, confidences
+        ):
+            box = tuple(float(value) for value in coordinates_xyxy)
+            if class_id == cuvette_id:
+                cuvettes.append(box)
+            elif class_id == liquid_id:
+                liquids.append(box)
+
+            x0, y0, x1, y1 = (int(value) for value in box)
+            x0 = min(max(x0, 0), annotated.shape[1] - 1)
+            x1 = min(max(x1, 0), annotated.shape[1] - 1)
+            y0 = min(max(y0, 0), annotated.shape[0] - 1)
+            y1 = min(max(y1, 0), annotated.shape[0] - 1)
+            cv2.rectangle(annotated, (x0, y0), (x1, y1), (0, 255, 0), 2)
+            label = str(result.names[class_id])
+            if settings["show_confidence"]:
+                label += " {:.2f}".format(float(confidence))
+            self._draw_detection_label(cv2, annotated, label, x0, y0, (0, 255, 0))
+
+        if not cuvettes:
+            raise ValueError("Calibration failed: no cuvette boxes were detected.")
+        if not liquids:
+            raise ValueError("Calibration failed: no liquid boxes were detected.")
+        pairs, unmatched_cuvettes, unmatched_liquids = _pair_cuvettes_and_liquids(
+            cuvettes, liquids
+        )
+        concentration_count = len(settings["con_list"])
+        if unmatched_cuvettes or unmatched_liquids or len(pairs) != concentration_count:
+            raise ValueError(
+                "Calibration pairing mismatch: {} valid pair(s), {} configured concentration(s), "
+                "{} unmatched cuvette box(es), {} unmatched liquid box(es).".format(
+                    len(pairs),
+                    concentration_count,
+                    len(unmatched_cuvettes),
+                    len(unmatched_liquids),
+                )
+            )
+
+        ratios = (
+            settings["x0_ratio"],
+            settings["y0_ratio"],
+            settings["x1_ratio"],
+            settings["y1_ratio"],
+        )
+        rgb_colors = {"R": (0, 0, 255), "G": (0, 255, 0), "B": (255, 0, 0)}
+        samples = []
+        for index, (cuvette_box, liquid_box) in enumerate(pairs):
+            try:
+                roi = _calculate_rgb_roi(liquid_box, original_bgr.shape, ratios)
+                red, green, blue = _calculate_rgb_averages(
+                    original_bgr, roi, settings["rgb_calculate_accuracy"]
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError("Calibration sample No.{} failed: {}".format(index + 1, error)) from error
+            concentration = float(settings["con_list"][index])
+            included = bool(settings["linear_formula_point_matrix"][index])
+            sample = {
+                "No.": index + 1,
+                "Con.": concentration,
+                "Red": red,
+                "Green": green,
+                "Blue": blue,
+                "included": included,
+                "cuvette_box": cuvette_box,
+                "liquid_box": liquid_box,
+                "rgb_roi": roi,
+            }
+            samples.append(sample)
+            x0_roi, y0_roi, x1_roi, y1_roi = roi
+            cv2.rectangle(annotated, (x0_roi, y0_roi), (x1_roi, y1_roi), (250, 240, 10), 2)
+            text_values = {
+                "R": round(red, settings["rgb_display_accuracy"]),
+                "G": round(green, settings["rgb_display_accuracy"]),
+                "B": round(blue, settings["rgb_display_accuracy"]),
+            }
+            con_text = round(concentration, settings["con_display_accuracy"])
+            text_lines = [
+                ("No.{}".format(index + 1), (255, 0, 255)),
+                ("Con.:{}".format(con_text), (255, 255, 0)),
+            ]
+            text_lines.extend(
+                ("{}:{}".format(channel, text_values[channel]), rgb_colors[channel])
+                for channel in display_order[3:]
+            )
+            anchor_x = int(cuvette_box[0])
+            layout = _text_layout(cv2, annotated.shape[0], [text for text, _ in text_lines])
+            preferred_top = int(cuvette_box[3]) + layout["thickness"] + 4
+            if preferred_top + layout["block_height"] > annotated.shape[0]:
+                preferred_top = int(cuvette_box[1]) - layout["block_height"] - 4
+            self._draw_text_block(cv2, annotated, text_lines, anchor_x, preferred_top)
+
+        included_samples = [sample for sample in samples if sample["included"]]
+        if len(included_samples) < 2:
+            raise ValueError("At least two calibration points must be included in regression.")
+        formula_concentrations = [sample["Con."] for sample in included_samples]
+        formulas = {
+            "R": self._regression_formula(
+                formula_concentrations, [sample["Red"] for sample in included_samples], "R"
+            ),
+            "G": self._regression_formula(
+                formula_concentrations, [sample["Green"] for sample in included_samples], "G"
+            ),
+            "B": self._regression_formula(
+                formula_concentrations, [sample["Blue"] for sample in included_samples], "B"
+            ),
+        }
+        return {
+            "source_path": str(source_path),
+            "image": annotated,
+            "samples": samples,
+            "formulas": formulas,
+            "selected_channel": settings["color_channel"],
+            "warnings": warnings,
+        }
+
     @Slot(str, str)
     def detect(self, image_path, weight_path):
         try:
@@ -461,18 +659,13 @@ class YoloDetectionWorker(QObject):
             import numpy as np
 
             settings, config_warnings, _ = load_effective_settings()
-            from ultralytics import YOLO
-
             encoded_path = np.fromfile(image_path, dtype=np.uint8)
             source_image = cv2.imdecode(encoded_path, cv2.IMREAD_COLOR)
             if source_image is None:
                 raise ValueError("The selected image could not be read: {}".format(image_path))
 
-            if self._model is None or self._weight_path != weight_path:
-                self._model = YOLO(weight_path)
-                self._weight_path = weight_path
-
-            results = self._model.predict(
+            model = self._get_model(weight_path)
+            results = model.predict(
                 source=source_image,
                 device="cpu",
                 conf=settings["detect_confidence"],
@@ -488,3 +681,43 @@ class YoloDetectionWorker(QObject):
             self.finished.emit(payload)
         except Exception as error:
             self.failed.emit("{}: {}".format(type(error).__name__, error))
+
+    @Slot(str, str)
+    def regress(self, image_path, weight_path):
+        started = time.perf_counter()
+        self._active_formulas = None
+        try:
+            import cv2
+            import numpy as np
+
+            settings, config_warnings, _ = load_effective_settings()
+            encoded_path = np.fromfile(image_path, dtype=np.uint8)
+            if encoded_path.size == 0:
+                raise ValueError("The calibration image is empty: {}".format(image_path))
+            source_image = cv2.imdecode(encoded_path, cv2.IMREAD_COLOR)
+            if source_image is None or source_image.shape[0] <= 0 or source_image.shape[1] <= 0:
+                raise ValueError("The calibration image could not be read: {}".format(image_path))
+
+            model = self._get_model(weight_path)
+            results = model.predict(
+                source=source_image,
+                device="cpu",
+                conf=settings["detect_confidence"],
+                save=False,
+                verbose=False,
+            )
+            if not results:
+                raise RuntimeError("YOLO returned no result for the calibration image.")
+            payload = self._build_regression_payload(
+                results[0],
+                settings,
+                cv2,
+                source_path=image_path,
+                config_warnings=config_warnings,
+            )
+            payload["elapsed_ms"] = (time.perf_counter() - started) * 1000.0
+            self._active_formulas = payload["formulas"]
+            self.regression_finished.emit(payload)
+        except Exception as error:
+            self._active_formulas = None
+            self.regression_failed.emit("{}: {}".format(type(error).__name__, error))

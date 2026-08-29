@@ -28,11 +28,14 @@ import openpyxl
 
 from ui import ui_detectmain
 from camera import Camera
+from interface_config import load_effective_settings
 from yolo_detection_worker import YoloDetectionWorker
 
 
 class DetectMain(QWidget):
     detection_requested = Signal(str, str)
+    regression_requested = Signal(str, str)
+    clear_active_formulas_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -45,6 +48,7 @@ class DetectMain(QWidget):
         self._regression_result = None
         self._regression_dirty = False
         self._last_calibration_directory = None
+        self._active_worker_task = None
 
 #        #put the cameraWidget in cameraMainlVLayout
         self.mainCamera = Camera()
@@ -225,12 +229,21 @@ class DetectMain(QWidget):
         self._detection_worker = YoloDetectionWorker()
         self._detection_worker.moveToThread(self._detection_thread)
         self.detection_requested.connect(self._detection_worker.detect)
+        self.regression_requested.connect(self._detection_worker.regress)
+        self.clear_active_formulas_requested.connect(
+            self._detection_worker.clear_active_formulas
+        )
         self._detection_worker.finished.connect(self._on_detection_finished)
         self._detection_worker.failed.connect(self._on_detection_failed)
+        self._detection_worker.regression_finished.connect(
+            self._on_regression_finished
+        )
+        self._detection_worker.regression_failed.connect(self._on_regression_failed)
         self._detection_thread.finished.connect(self._detection_worker.deleteLater)
         self._detection_thread.start()
 
         self.ui.pushButton_5.clicked.connect(self._select_calibration_image)
+        self.ui.pushButton_4.clicked.connect(self._start_linear_regression)
         self.ui.pushButton.clicked.connect(self._select_detection_image)
         self._reset_calibration_ui()
         app = QCoreApplication.instance()
@@ -308,6 +321,19 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(False)
         self.ui.pushButton_8.setEnabled(False)
 
+    def _set_active_worker_task(self, task):
+        if task not in (None, "detection", "regression"):
+            raise ValueError("Unknown worker task: {}".format(task))
+        self._active_worker_task = task
+        busy = task is not None
+        self.ui.pushButton_5.setEnabled(not busy)
+        self.ui.pushButton_4.setEnabled(
+            not busy and self._calibration_source_path is not None
+        )
+        self.ui.pushButton.setEnabled(not busy)
+        self.ui.pushButton_7.setEnabled(False)
+        self.ui.pushButton_8.setEnabled(False)
+
     def _reset_calibration_ui(self):
         self._calibration_source_path = None
         self._calibration_source_image = None
@@ -317,8 +343,7 @@ class DetectMain(QWidget):
         self.ui.labelOrigImg.setText("Import a calibration image")
         self.ui.labelOrigImg.setAlignment(Qt.AlignCenter)
         self._clear_calibration_results()
-        self.ui.pushButton_5.setEnabled(True)
-        self.ui.pushButton_4.setEnabled(False)
+        self._set_active_worker_task(None)
 
     @Slot()
     def _select_calibration_image(self):
@@ -350,11 +375,69 @@ class DetectMain(QWidget):
         self.ui.labelOrigImg.setText("")
         self._scale_label(self.ui.labelOrigImg)
         self._clear_calibration_results()
-        self.ui.pushButton_5.setEnabled(True)
-        self.ui.pushButton_4.setEnabled(True)
+        self.clear_active_formulas_requested.emit()
+        self._set_active_worker_task(None)
+
+    @Slot()
+    def _start_linear_regression(self):
+        if self._active_worker_task is not None:
+            QMessageBox.warning(self, "Linear regression", "Another task is already running.")
+            return
+        if not self._calibration_source_path or self._calibration_source_image is None:
+            QMessageBox.critical(
+                self, "Linear regression error", "Import a calibration image first."
+            )
+            return
+        calibration_path = Path(self._calibration_source_path)
+        if not calibration_path.is_file():
+            QMessageBox.critical(
+                self,
+                "Linear regression error",
+                "The calibration image was not found:\n{}".format(calibration_path),
+            )
+            return
+        repository_root = Path(__file__).resolve().parent.parent
+        weight_path = (
+            repository_root
+            / "HT-Detector_Peng"
+            / "weights"
+            / "cuvette_Peng"
+            / "yolov8n_train"
+            / "weights"
+            / "best.pt"
+        )
+        if not weight_path.is_file():
+            QMessageBox.critical(
+                self,
+                "Linear regression error",
+                "YOLO weight file was not found:\n{}".format(weight_path),
+            )
+            return
+        try:
+            load_effective_settings(apply_to_module=False)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Linear regression error",
+                "Interface settings could not be loaded: {}".format(error),
+            )
+            return
+
+        self._clear_calibration_results()
+        self._origPixmap = self._bgr_image_to_pixmap(self._calibration_source_image)
+        self.origImg = self._calibration_source_path
+        self._scale_label(self.ui.labelOrigImg)
+        self.ui.progressBar.setRange(0, 0)
+        self._set_active_worker_task("regression")
+        self.regression_requested.emit(
+            self._calibration_source_path, str(weight_path)
+        )
 
     @Slot()
     def _select_detection_image(self):
+        if self._active_worker_task is not None:
+            QMessageBox.warning(self, "Detection", "Another task is already running.")
+            return
         image_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select an image for detection",
@@ -382,17 +465,16 @@ class DetectMain(QWidget):
             )
             return
 
-        self.ui.pushButton.setEnabled(False)
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(0)
         self.ui.progressBar.setRange(0, 0)
+        self._set_active_worker_task("detection")
         self.detection_requested.emit(image_path, str(weight_path))
 
     @Slot(object)
     def _on_detection_finished(self, payload):
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(100)
-        self.ui.pushButton.setEnabled(True)
 
         image = payload["image"]
         height, width, channels = image.shape
@@ -413,13 +495,51 @@ class DetectMain(QWidget):
         warnings = [str(message) for message in payload.get("warnings", []) if message]
         if warnings:
             QMessageBox.warning(self, "Detection warning", "\n".join(warnings))
+        self._set_active_worker_task(None)
 
     @Slot(str)
     def _on_detection_failed(self, message):
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(0)
-        self.ui.pushButton.setEnabled(True)
+        self._set_active_worker_task(None)
         QMessageBox.critical(self, "Detection error", message)
+
+    @Slot(object)
+    def _on_regression_finished(self, payload):
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(100)
+        self._regression_result = payload
+        self._regression_dirty = True
+        self.origImg = payload["image"]
+        self._origPixmap = self._bgr_image_to_pixmap(payload["image"])
+        self._scale_label(self.ui.labelOrigImg)
+
+        headers = list(self.CALIBRATION_TABLE_HEADERS)
+        rows = [tuple(sample[header] for header in headers) for sample in payload["samples"]]
+        self._populate_tableview(self.ui.tabviewOrig, headers, rows)
+        self.ui.tabviewOrig.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.ui.lcdNumber.display(int(round(payload["elapsed_ms"])))
+        self._set_active_worker_task(None)
+
+        warnings = [str(message) for message in payload.get("warnings", []) if message]
+        if warnings:
+            QMessageBox.warning(self, "Linear regression warning", "\n".join(warnings))
+
+    @Slot(str)
+    def _on_regression_failed(self, message):
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(0)
+        self._clear_calibration_results()
+        if self._calibration_source_image is not None:
+            self.origImg = self._calibration_source_path
+            self._origPixmap = self._bgr_image_to_pixmap(
+                self._calibration_source_image
+            )
+            self._scale_label(self.ui.labelOrigImg)
+        self._set_active_worker_task(None)
+        QMessageBox.critical(self, "Linear regression error", message)
 
     @Slot()
     def _shutdown_detection_thread(self):
