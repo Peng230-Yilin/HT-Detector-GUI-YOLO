@@ -2,6 +2,11 @@
 
 import sys
 import os
+import io
+import math
+import numbers
+import shutil
+import tempfile
 from pathlib import Path
 from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QDialog, QFontComboBox,QTextEdit, QInputDialog,
@@ -36,6 +41,7 @@ class DetectMain(QWidget):
     detection_requested = Signal(str, str)
     regression_requested = Signal(str, str)
     clear_active_formulas_requested = Signal()
+    install_saved_formulas_requested = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -234,6 +240,9 @@ class DetectMain(QWidget):
         self.clear_active_formulas_requested.connect(
             self._detection_worker.clear_active_formulas
         )
+        self.install_saved_formulas_requested.connect(
+            self._detection_worker.install_saved_formulas
+        )
         self._detection_worker.finished.connect(self._on_detection_finished)
         self._detection_worker.failed.connect(self._on_detection_failed)
         self._detection_worker.regression_finished.connect(
@@ -247,6 +256,7 @@ class DetectMain(QWidget):
         self.ui.pushButton_4.clicked.connect(self._start_linear_regression)
         self.ui.pushButton.clicked.connect(self._select_detection_image)
         self.ui.pushButton_7.clicked.connect(self._plot_regression_result)
+        self.ui.pushButton_8.clicked.connect(self._save_linear_result)
         self._reset_calibration_ui()
         app = QCoreApplication.instance()
         if app is not None:
@@ -271,6 +281,13 @@ class DetectMain(QWidget):
     CALIBRATION_TABLE_HEADERS = ("No.", "Con.", "Red", "Green", "Blue")
     CALIBRATION_PLOT_PLACEHOLDER = "Run linear regression, then click Plot."
     REGRESSION_CHANNEL_FIELDS = {"R": "Red", "G": "Green", "B": "Blue"}
+    FORMULA_CHANNELS = ("R", "G", "B")
+    FORMULA_FIELDS = ("slope", "intercept", "r", "R2", "p", "std_err")
+    LINEAR_EXPORT_FILENAMES = (
+        "linear_con_rgb.xlsx",
+        "standard_curve.png",
+        "calibration_annotated.png",
+    )
 
     @staticmethod
     def _decode_calibration_image(image_path):
@@ -328,7 +345,300 @@ class DetectMain(QWidget):
         )
         self._show_calibration_plot_placeholder()
         self.ui.pushButton_7.setEnabled(False)
-        self.ui.pushButton_8.setEnabled(False)
+        self._update_save_button()
+
+    def _validated_linear_export_payload(self):
+        payload = self._regression_result
+        if not isinstance(payload, dict):
+            raise ValueError("No linear regression result is available.")
+        source_path = payload.get("source_path")
+        if not isinstance(source_path, str) or not source_path.strip():
+            raise ValueError("The regression source path is missing.")
+        if not Path(source_path).is_file():
+            raise ValueError("The regression source image no longer exists: {}".format(source_path))
+
+        image = payload.get("image")
+        if not isinstance(image, np.ndarray) or image.ndim != 3 or image.size == 0:
+            raise ValueError("The regression annotated image is invalid.")
+        if image.shape[2] not in (3, 4):
+            raise ValueError("The regression annotated image has an unsupported channel count.")
+
+        samples = payload.get("samples")
+        if not isinstance(samples, list) or not samples:
+            raise ValueError("The regression samples are missing or invalid.")
+        validated_samples = []
+        included_count = 0
+        included_concentrations = set()
+        for index, sample in enumerate(samples, start=1):
+            if not isinstance(sample, dict):
+                raise ValueError("Regression sample {} is invalid.".format(index))
+            row = {}
+            for field in self.CALIBRATION_TABLE_HEADERS:
+                value = sample.get(field)
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError("Regression sample {} field {} must be numeric.".format(index, field))
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError("Regression sample {} field {} must be finite.".format(index, field))
+                row[field] = sample[field]
+            included = sample.get("included")
+            if not isinstance(included, bool):
+                raise ValueError("Regression sample {} included must be bool.".format(index))
+            row["included"] = included
+            included_count += int(included)
+            if included:
+                included_concentrations.add(float(row["Con."]))
+            validated_samples.append(row)
+        if included_count < 2:
+            raise ValueError("At least two regression samples must be included.")
+        if len(included_concentrations) < 2:
+            raise ValueError("Included samples must contain at least two distinct concentrations.")
+
+        formulas = payload.get("formulas")
+        if not isinstance(formulas, dict) or set(formulas) != set(self.FORMULA_CHANNELS):
+            raise ValueError("Regression formulas must contain exactly R, G, and B.")
+        validated_formulas = {}
+        for channel in self.FORMULA_CHANNELS:
+            formula = formulas[channel]
+            if not isinstance(formula, dict):
+                raise ValueError("Regression formula {} is invalid.".format(channel))
+            values = {}
+            for field in self.FORMULA_FIELDS:
+                value = formula.get(field)
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError("Regression formula {}.{} must be numeric.".format(channel, field))
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError("Regression formula {}.{} must be finite.".format(channel, field))
+                values[field] = formula[field]
+            if math.isclose(float(values["slope"]), 0.0, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError("Regression formula {} slope must not be zero or near zero.".format(channel))
+            validated_formulas[channel] = values
+
+        selected_channel = payload.get("selected_channel")
+        if selected_channel not in self.FORMULA_CHANNELS:
+            raise ValueError("The selected regression channel is invalid.")
+        return {
+            "source_path": source_path,
+            "image": image,
+            "samples": validated_samples,
+            "formulas": validated_formulas,
+            "selected_channel": selected_channel,
+        }
+
+    def _has_valid_linear_export(self):
+        try:
+            self._validated_linear_export_payload()
+        except ValueError:
+            return False
+        return True
+
+    def _update_save_button(self):
+        available = self._regression_dirty and self._has_valid_linear_export()
+        self.ui.pushButton_8.setText("Save Linear" if available else "Save")
+        self.ui.pushButton_8.setEnabled(
+            available and self._active_worker_task is None
+        )
+
+    def _confirm_discard_unsaved_regression(self):
+        if not self._regression_dirty:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Unsaved linear regression",
+            "当前线性回归结果尚未保存，继续操作将丢弃该结果。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    @classmethod
+    def _build_linear_workbook_bytes(cls, export_payload):
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Sheet1"
+        sample_headers = ("No.", "Con.", "Red", "Green", "Blue", "included")
+        for column, header in enumerate(sample_headers, start=1):
+            worksheet.cell(1, column, header)
+        for row_index, sample in enumerate(export_payload["samples"], start=2):
+            for column, header in enumerate(sample_headers, start=1):
+                worksheet.cell(row_index, column, sample[header])
+
+        formula_headers = ("Channel",) + cls.FORMULA_FIELDS
+        for column, header in enumerate(formula_headers, start=8):
+            worksheet.cell(1, column, header)
+        for row_index, channel in enumerate(cls.FORMULA_CHANNELS, start=2):
+            worksheet.cell(row_index, 8, channel)
+            for column, field in enumerate(cls.FORMULA_FIELDS, start=9):
+                worksheet.cell(row_index, column, export_payload["formulas"][channel][field])
+
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        workbook.close()
+        return buffer.getvalue()
+
+    @classmethod
+    def _validate_linear_workbook_bytes(cls, workbook_bytes, export_payload):
+        def values_match(actual, expected):
+            if isinstance(expected, bool):
+                return isinstance(actual, bool) and actual is expected
+            if isinstance(expected, numbers.Real) and not isinstance(expected, bool):
+                return (
+                    isinstance(actual, numbers.Real)
+                    and not isinstance(actual, bool)
+                    and math.isclose(
+                        float(actual), float(expected), rel_tol=1e-15, abs_tol=0.0
+                    )
+                )
+            return actual == expected
+
+        workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), read_only=True, data_only=True)
+        try:
+            if workbook.sheetnames != ["Sheet1"]:
+                raise ValueError("The exported workbook must contain only Sheet1.")
+            worksheet = workbook["Sheet1"]
+            sample_headers = tuple(worksheet.cell(1, column).value for column in range(1, 7))
+            if sample_headers != ("No.", "Con.", "Red", "Green", "Blue", "included"):
+                raise ValueError("The exported sample headers A1:F1 are invalid.")
+            if worksheet["G1"].value is not None:
+                raise ValueError("Column G must remain empty.")
+            formula_headers = tuple(worksheet.cell(1, column).value for column in range(8, 15))
+            if formula_headers != ("Channel",) + cls.FORMULA_FIELDS:
+                raise ValueError("The exported formula headers H1:N1 are invalid.")
+            for row_index in range(1, max(len(export_payload["samples"]) + 1, 4) + 1):
+                if worksheet.cell(row_index, 7).value is not None:
+                    raise ValueError("Column G must remain empty.")
+            for row_index, expected in enumerate(export_payload["samples"], start=2):
+                actual = tuple(worksheet.cell(row_index, column).value for column in range(1, 7))
+                wanted = tuple(expected[field] for field in ("No.", "Con.", "Red", "Green", "Blue", "included"))
+                if not all(values_match(value, expected) for value, expected in zip(actual, wanted)):
+                    raise ValueError("The exported sample row {} does not match the payload.".format(row_index))
+                if worksheet.cell(row_index, 7).value is not None:
+                    raise ValueError("Column G must remain empty.")
+            for row_index, channel in enumerate(cls.FORMULA_CHANNELS, start=2):
+                actual = tuple(worksheet.cell(row_index, column).value for column in range(8, 15))
+                wanted = (channel,) + tuple(export_payload["formulas"][channel][field] for field in cls.FORMULA_FIELDS)
+                if not all(values_match(value, expected) for value, expected in zip(actual, wanted)):
+                    raise ValueError("The exported {} formula does not match the payload.".format(channel))
+        finally:
+            workbook.close()
+
+    def _build_linear_export_bytes(self, export_payload):
+        self._plot_regression_result()
+        workbook_bytes = self._build_linear_workbook_bytes(export_payload)
+        self._validate_linear_workbook_bytes(workbook_bytes, export_payload)
+
+        curve_buffer = io.BytesIO()
+        self.canvas.print_png(curve_buffer)
+        curve_bytes = curve_buffer.getvalue()
+        if not curve_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("The standard curve PNG could not be encoded.")
+
+        import cv2
+        decoded_curve = cv2.imdecode(np.frombuffer(curve_bytes, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if decoded_curve is None or decoded_curve.size == 0:
+            raise ValueError("The standard curve PNG failed verification.")
+        success, encoded = cv2.imencode(".png", export_payload["image"])
+        if not success or encoded.size == 0:
+            raise ValueError("The calibration annotated PNG could not be encoded.")
+        annotated_bytes = encoded.tobytes()
+        decoded = cv2.imdecode(np.frombuffer(annotated_bytes, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if decoded is None or decoded.shape != export_payload["image"].shape:
+            raise ValueError("The calibration annotated PNG failed verification.")
+        return {
+            "linear_con_rgb.xlsx": workbook_bytes,
+            "standard_curve.png": curve_bytes,
+            "calibration_annotated.png": annotated_bytes,
+        }
+
+    @staticmethod
+    def _commit_linear_export(target_directory, files):
+        target_directory.mkdir(parents=True, exist_ok=True)
+        transaction_path = Path(tempfile.mkdtemp(prefix=".save-linear-", dir=str(target_directory)))
+        staged_path = transaction_path / "staged"
+        backup_path = transaction_path / "backup"
+        staged_path.mkdir()
+        backup_path.mkdir()
+        backups = []
+        committed = []
+        try:
+            for filename, content in files.items():
+                (staged_path / filename).write_bytes(content)
+            for filename in files:
+                target = target_directory / filename
+                if target.exists():
+                    os.replace(str(target), str(backup_path / filename))
+                    backups.append(filename)
+            for filename in files:
+                os.replace(str(staged_path / filename), str(target_directory / filename))
+                committed.append(filename)
+        except Exception as error:
+            rollback_errors = []
+            for filename in reversed(committed):
+                try:
+                    (target_directory / filename).unlink()
+                except OSError as rollback_error:
+                    rollback_errors.append("remove {}: {}".format(filename, rollback_error))
+            for filename in reversed(backups):
+                try:
+                    os.replace(str(backup_path / filename), str(target_directory / filename))
+                except OSError as rollback_error:
+                    rollback_errors.append("restore {}: {}".format(filename, rollback_error))
+            if rollback_errors:
+                raise RuntimeError(
+                    "Save failed and rollback was incomplete. Recovery files are in {}. {}".format(
+                        transaction_path, "; ".join(rollback_errors)
+                    )
+                ) from error
+            shutil.rmtree(transaction_path, ignore_errors=True)
+            raise RuntimeError("Save failed; all previous files were restored: {}".format(error)) from error
+        shutil.rmtree(transaction_path)
+
+    @Slot()
+    def _save_linear_result(self):
+        if self._active_worker_task is not None:
+            return
+        try:
+            export_payload = self._validated_linear_export_payload()
+        except ValueError as error:
+            self._regression_dirty = bool(self._regression_result)
+            self._update_save_button()
+            QMessageBox.critical(self, "Save Linear error", str(error))
+            return
+
+        repository_root = Path(__file__).resolve().parent.parent
+        target_directory = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results" / "linear"
+        existing = [name for name in self.LINEAR_EXPORT_FILENAMES if (target_directory / name).exists()]
+        if existing:
+            answer = QMessageBox.question(
+                self,
+                "Overwrite linear regression files",
+                "The following files in {} will be replaced:\n\n{}".format(
+                    target_directory, "\n".join(existing)
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._update_save_button()
+                return
+
+        self._set_active_worker_task("save_linear")
+        try:
+            files = self._build_linear_export_bytes(export_payload)
+            self._commit_linear_export(target_directory, files)
+        except Exception as error:
+            self._regression_dirty = True
+            self._set_active_worker_task(None)
+            QMessageBox.critical(self, "Save Linear error", str(error))
+            return
+
+        self.install_saved_formulas_requested.emit(export_payload["formulas"])
+        self._regression_dirty = False
+        self._set_active_worker_task(None)
+        QMessageBox.information(
+            self, "Save Linear", "Linear regression results were saved to:\n{}".format(target_directory)
+        )
 
     def _regression_plot_data(self):
         payload = self._regression_result
@@ -393,7 +703,7 @@ class DetectMain(QWidget):
         except ValueError as error:
             self._show_calibration_plot_placeholder()
             self.ui.pushButton_7.setEnabled(False)
-            self.ui.pushButton_8.setEnabled(False)
+            self._update_save_button()
             QMessageBox.critical(self, "Plot error", str(error))
             return
 
@@ -441,10 +751,10 @@ class DetectMain(QWidget):
         self.ax.set_ylim(padded_limits(list(used_y) + list(line_y)))
         self.canvas.draw()
         self.ui.pushButton_7.setEnabled(True)
-        self.ui.pushButton_8.setEnabled(False)
+        self._update_save_button()
 
     def _set_active_worker_task(self, task):
-        if task not in (None, "detection", "regression"):
+        if task not in (None, "detection", "regression", "save_linear"):
             raise ValueError("Unknown worker task: {}".format(task))
         self._active_worker_task = task
         busy = task is not None
@@ -456,7 +766,7 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(
             not busy and self._has_valid_regression_result()
         )
-        self.ui.pushButton_8.setEnabled(False)
+        self._update_save_button()
 
     def _reset_calibration_ui(self):
         self._calibration_source_path = None
@@ -490,6 +800,8 @@ class DetectMain(QWidget):
         except (OSError, RuntimeError, ValueError) as error:
             QMessageBox.critical(self, "Calibration image error", str(error))
             return
+        if not self._confirm_discard_unsaved_regression():
+            return
 
         self._calibration_source_path = normalized_path
         self._calibration_source_image = source_image
@@ -511,6 +823,8 @@ class DetectMain(QWidget):
             QMessageBox.critical(
                 self, "Linear regression error", "Import a calibration image first."
             )
+            return
+        if not self._confirm_discard_unsaved_regression():
             return
         calibration_path = Path(self._calibration_source_path)
         if not calibration_path.is_file():

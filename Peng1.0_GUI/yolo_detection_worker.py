@@ -150,6 +150,9 @@ class YoloDetectionWorker(QObject):
     regression_finished = Signal(object)
     regression_failed = Signal(str)
 
+    FORMULA_CHANNELS = ("R", "G", "B")
+    FORMULA_FIELDS = ("slope", "intercept", "r", "R2", "p", "std_err")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._model = None
@@ -157,24 +160,83 @@ class YoloDetectionWorker(QObject):
         self._formula_cache = {}
         self._active_formulas = None
 
-    def _load_formula(self, color_channel):
-        if self._active_formulas is not None:
-            formula = self._active_formulas[color_channel]
-            return formula["slope"], formula["intercept"]
-        if color_channel in self._formula_cache:
-            return self._formula_cache[color_channel]
+    @classmethod
+    def _validated_formulas(cls, formulas, source="regression formulas"):
+        if not isinstance(formulas, dict) or set(formulas) != set(cls.FORMULA_CHANNELS):
+            raise ValueError("{} must contain exactly R, G, and B.".format(source))
+        validated = {}
+        for channel in cls.FORMULA_CHANNELS:
+            formula = formulas[channel]
+            if not isinstance(formula, dict):
+                raise ValueError("{} channel {} is invalid.".format(source, channel))
+            values = {}
+            for field in cls.FORMULA_FIELDS:
+                value = formula.get(field)
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError(
+                        "{} {}.{} must be numeric.".format(source, channel, field)
+                    )
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(
+                        "{} {}.{} must be finite.".format(source, channel, field)
+                    )
+                values[field] = value
+            if math.isclose(values["slope"], 0.0, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError("{} {} slope must not be zero or near zero.".format(source, channel))
+            validated[channel] = values
+        return validated
 
+    @classmethod
+    def _read_merged_formulas(cls, formula_path):
         from openpyxl import load_workbook
 
-        repository_root = Path(__file__).resolve().parent.parent
-        formula_path = (
-            repository_root
-            / "HT-Detector_Peng"
-            / "runs"
-            / "detect"
-            / "results"
-            / "linear_formula_{}.xlsx".format(color_channel)
-        )
+        try:
+            workbook = load_workbook(formula_path, read_only=True, data_only=True)
+        except Exception as error:
+            raise RuntimeError(
+                "The merged standard curve file could not be opened: {}: {}".format(
+                    formula_path, error
+                )
+            ) from error
+        try:
+            if "Sheet1" not in workbook.sheetnames:
+                raise RuntimeError("Sheet1 is missing from: {}".format(formula_path))
+            worksheet = workbook["Sheet1"]
+            expected_headers = ("Channel",) + cls.FORMULA_FIELDS
+            headers = tuple(worksheet.cell(1, column).value for column in range(8, 15))
+            if headers != expected_headers:
+                raise RuntimeError(
+                    "The merged standard curve headers H1:N1 are invalid in: {}".format(
+                        formula_path
+                    )
+                )
+            formulas = {}
+            for row in range(2, worksheet.max_row + 1):
+                channel = worksheet.cell(row, 8).value
+                values = tuple(worksheet.cell(row, column).value for column in range(9, 15))
+                if channel is None and all(value is None for value in values):
+                    continue
+                if channel not in cls.FORMULA_CHANNELS:
+                    raise RuntimeError(
+                        "Invalid formula channel at H{} in: {}".format(row, formula_path)
+                    )
+                if channel in formulas:
+                    raise RuntimeError(
+                        "Duplicate formula channel {} in: {}".format(channel, formula_path)
+                    )
+                formulas[channel] = dict(zip(cls.FORMULA_FIELDS, values))
+        finally:
+            workbook.close()
+        try:
+            return cls._validated_formulas(formulas, str(formula_path))
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+
+    @staticmethod
+    def _read_legacy_formula(formula_path):
+        from openpyxl import load_workbook
+
         if not formula_path.is_file():
             raise RuntimeError("The standard curve file was not found: {}".format(formula_path))
 
@@ -204,8 +266,32 @@ class YoloDetectionWorker(QObject):
         if math.isclose(slope, 0.0, rel_tol=0.0, abs_tol=1e-12):
             raise RuntimeError("slope must not be zero or near zero in: {}".format(formula_path))
 
-        self._formula_cache[color_channel] = (slope, intercept)
         return slope, intercept
+
+    def _load_formula(self, color_channel):
+        if self._active_formulas is not None:
+            formula = self._active_formulas[color_channel]
+            return formula["slope"], formula["intercept"]
+        if color_channel in self._formula_cache:
+            return self._formula_cache[color_channel]
+
+        repository_root = Path(__file__).resolve().parent.parent
+        results_root = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results"
+        merged_path = results_root / "linear" / "linear_con_rgb.xlsx"
+        if merged_path.is_file():
+            formulas = self._read_merged_formulas(merged_path)
+            self._formula_cache.update(
+                {
+                    channel: (formula["slope"], formula["intercept"])
+                    for channel, formula in formulas.items()
+                }
+            )
+            return self._formula_cache[color_channel]
+
+        legacy_path = results_root / "linear_formula_{}.xlsx".format(color_channel)
+        formula = self._read_legacy_formula(legacy_path)
+        self._formula_cache[color_channel] = formula
+        return formula
 
     def _get_model(self, weight_path):
         if self._model is None or self._weight_path != weight_path:
@@ -218,6 +304,15 @@ class YoloDetectionWorker(QObject):
     @Slot()
     def clear_active_formulas(self):
         self._active_formulas = None
+
+    @Slot(object)
+    def install_saved_formulas(self, formulas):
+        validated = self._validated_formulas(formulas, "saved regression formulas")
+        self._active_formulas = validated
+        self._formula_cache = {
+            channel: (formula["slope"], formula["intercept"])
+            for channel, formula in validated.items()
+        }
 
     @staticmethod
     def _class_ids(names):
