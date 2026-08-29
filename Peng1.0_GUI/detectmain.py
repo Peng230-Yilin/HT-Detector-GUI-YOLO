@@ -40,6 +40,12 @@ class DetectMain(QWidget):
         self.ui.setupUi(self)
         self._install_resizable_splitters()
 
+        self._calibration_source_path = None
+        self._calibration_source_image = None
+        self._regression_result = None
+        self._regression_dirty = False
+        self._last_calibration_directory = None
+
 #        #put the cameraWidget in cameraMainlVLayout
         self.mainCamera = Camera()
 #        self.ui.cameraMainGroupBox.setWidget(self.mainCamera._ui.cameraWidget)
@@ -224,7 +230,9 @@ class DetectMain(QWidget):
         self._detection_thread.finished.connect(self._detection_worker.deleteLater)
         self._detection_thread.start()
 
+        self.ui.pushButton_5.clicked.connect(self._select_calibration_image)
         self.ui.pushButton.clicked.connect(self._select_detection_image)
+        self._reset_calibration_ui()
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._shutdown_detection_thread)
@@ -244,6 +252,106 @@ class DetectMain(QWidget):
     }
 
     IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
+
+    CALIBRATION_TABLE_HEADERS = ("No.", "Con.", "Red", "Green", "Blue")
+    CALIBRATION_PLOT_PLACEHOLDER = "Run linear regression, then click Plot."
+
+    @staticmethod
+    def _decode_calibration_image(image_path):
+        import cv2
+        import numpy as np
+
+        path = Path(image_path)
+        if not path.is_file():
+            raise ValueError("The selected calibration image does not exist or is not a file.")
+
+        try:
+            encoded = np.fromfile(str(path), dtype=np.uint8)
+        except OSError as error:
+            raise ValueError("The selected calibration image could not be read: {}".format(error)) from error
+        if encoded.size == 0:
+            raise ValueError("The selected calibration image is empty.")
+
+        image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("The selected file is not a valid supported calibration image.")
+        if image.ndim != 3 or image.shape[0] <= 0 or image.shape[1] <= 0:
+            raise ValueError("The decoded calibration image has invalid dimensions.")
+        return image
+
+    @staticmethod
+    def _bgr_image_to_pixmap(image):
+        height, width, channels = image.shape
+        bytes_per_line = channels * width
+        qt_image = QImage(
+            image.data, width, height, bytes_per_line, QImage.Format_RGB888
+        ).rgbSwapped().copy()
+        return QPixmap.fromImage(qt_image)
+
+    def _clear_calibration_results(self):
+        self._regression_result = None
+        self._regression_dirty = False
+        self._populate_tableview(
+            self.ui.tabviewOrig, self.CALIBRATION_TABLE_HEADERS, []
+        )
+        self.ax.clear()
+        self.ax.text(
+            0.5,
+            0.5,
+            self.CALIBRATION_PLOT_PLACEHOLDER,
+            transform=self.ax.transAxes,
+            ha="center",
+            va="center",
+        )
+        self.ax.set_axis_off()
+        self.canvas.draw()
+        self.ui.pushButton_7.setEnabled(False)
+        self.ui.pushButton_8.setEnabled(False)
+
+    def _reset_calibration_ui(self):
+        self._calibration_source_path = None
+        self._calibration_source_image = None
+        self.origImg = None
+        self._origPixmap = QPixmap()
+        self.ui.labelOrigImg.clear()
+        self.ui.labelOrigImg.setText("Import a calibration image")
+        self.ui.labelOrigImg.setAlignment(Qt.AlignCenter)
+        self._clear_calibration_results()
+        self.ui.pushButton_5.setEnabled(True)
+        self.ui.pushButton_4.setEnabled(False)
+
+    @Slot()
+    def _select_calibration_image(self):
+        initial_directory = self._last_calibration_directory or ""
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select a calibration image",
+            initial_directory,
+            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
+        )
+        if not image_path:
+            return
+
+        try:
+            source_image = self._decode_calibration_image(image_path)
+            normalized_path = str(Path(image_path).resolve(strict=True))
+            pixmap = self._bgr_image_to_pixmap(source_image)
+            if pixmap.isNull():
+                raise ValueError("The decoded calibration image could not be displayed.")
+        except (OSError, RuntimeError, ValueError) as error:
+            QMessageBox.critical(self, "Calibration image error", str(error))
+            return
+
+        self._calibration_source_path = normalized_path
+        self._calibration_source_image = source_image
+        self._last_calibration_directory = str(Path(normalized_path).parent)
+        self.origImg = normalized_path
+        self._origPixmap = pixmap
+        self.ui.labelOrigImg.setText("")
+        self._scale_label(self.ui.labelOrigImg)
+        self._clear_calibration_results()
+        self.ui.pushButton_5.setEnabled(True)
+        self.ui.pushButton_4.setEnabled(True)
 
     @Slot()
     def _select_detection_image(self):
