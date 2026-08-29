@@ -187,6 +187,9 @@ class DetectMain(QWidget):
         det_disp_headers, det_disp_rows = self._read_excel(
             './interface/detect/only_table/detection_table.xlsx')
         self._populate_tableview(self.ui.tabviewRecg, det_disp_headers, det_disp_rows)
+        self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
 
 
         self.origImg = self._resolve_image('./interface/linear/image/linear_regression_image')
@@ -277,12 +280,13 @@ class DetectMain(QWidget):
         self.ui.progressBar.setRange(0, 0)
         self.detection_requested.emit(image_path, str(weight_path))
 
-    @Slot(object, bool, str)
-    def _on_detection_finished(self, image, has_detections, message):
+    @Slot(object)
+    def _on_detection_finished(self, payload):
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(100)
         self.ui.pushButton.setEnabled(True)
 
+        image = payload["image"]
         height, width, channels = image.shape
         bytes_per_line = channels * width
         qt_image = QImage(
@@ -291,8 +295,16 @@ class DetectMain(QWidget):
         self._recgPixmap = QPixmap.fromImage(qt_image)
         self._scale_label(self.ui.labelRecgImg)
 
-        if not has_detections:
-            QMessageBox.information(self, "Detection", message)
+        headers = ["No.", "Con.", "Red", "Green", "Blue"]
+        rows = [tuple(target[header] for header in headers) for target in payload["targets"]]
+        self._populate_tableview(self.ui.tabviewRecg, headers, rows)
+        self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        warnings = [str(message) for message in payload.get("warnings", []) if message]
+        if warnings:
+            QMessageBox.warning(self, "Detection warning", "\n".join(warnings))
 
     @Slot(str)
     def _on_detection_failed(self, message):
