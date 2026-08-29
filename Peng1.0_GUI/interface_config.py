@@ -24,6 +24,8 @@ ALLOWED_SETTINGS = (
     "rgb_display_accuracy",
     "con_display_accuracy",
     "Order_Con_R_G_B",
+    "con_list",
+    "linear_formula_point_matrix",
 )
 TEXT_ORDERS = (
     "ConRGB",
@@ -93,10 +95,10 @@ def default_settings(interface_module=None):
     global _DEFAULT_SETTINGS
     if _DEFAULT_SETTINGS is None:
         module = interface_module or load_interface_module()
-        _DEFAULT_SETTINGS = {
+        raw_defaults = {
             name: copy.deepcopy(getattr(module, name)) for name in ALLOWED_SETTINGS
         }
-        validate_settings(_DEFAULT_SETTINGS)
+        _DEFAULT_SETTINGS = validate_settings(raw_defaults)
     return copy.deepcopy(_DEFAULT_SETTINGS)
 
 
@@ -131,6 +133,8 @@ def validate_settings(settings):
     if unknown:
         raise ValueError("Unknown setting(s): {}.".format(", ".join(sorted(unknown))))
 
+    validated = copy.deepcopy(settings)
+
     _require_number(settings, "detect_confidence", 0.001, 1.0)
     if not isinstance(settings["show_confidence"], bool):
         raise ValueError("show_confidence must be bool.")
@@ -147,7 +151,51 @@ def validate_settings(settings):
     _require_integer(settings, "con_display_accuracy", 0, 6)
     if settings["Order_Con_R_G_B"] not in TEXT_ORDERS:
         raise ValueError("Order_Con_R_G_B is invalid.")
-    return copy.deepcopy(settings)
+
+    concentrations = settings["con_list"]
+    if not isinstance(concentrations, list):
+        raise ValueError("con_list must be a list.")
+    if not 2 <= len(concentrations) <= 100:
+        raise ValueError("con_list must contain from 2 to 100 concentrations.")
+    normalized_concentrations = []
+    for index, value in enumerate(concentrations, start=1):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ValueError(
+                "con_list item {} must be numeric and must not be bool.".format(index)
+            )
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("con_list item {} must be finite.".format(index))
+        if value < 0.0:
+            raise ValueError("con_list item {} must be at least 0.".format(index))
+        if normalized_concentrations and value <= normalized_concentrations[-1]:
+            raise ValueError("con_list must be strictly increasing from left to right.")
+        normalized_concentrations.append(value)
+    validated["con_list"] = normalized_concentrations
+
+    point_matrix = settings["linear_formula_point_matrix"]
+    if not isinstance(point_matrix, list):
+        raise ValueError("linear_formula_point_matrix must be a list.")
+    if len(point_matrix) != len(normalized_concentrations):
+        raise ValueError(
+            "linear_formula_point_matrix length must match con_list length."
+        )
+    normalized_matrix = []
+    for index, value in enumerate(point_matrix, start=1):
+        if isinstance(value, bool):
+            normalized_matrix.append(value)
+        elif isinstance(value, int) and value in (0, 1):
+            normalized_matrix.append(bool(value))
+        else:
+            raise ValueError(
+                "linear_formula_point_matrix item {} must be bool or integer 0/1.".format(
+                    index
+                )
+            )
+    if sum(normalized_matrix) < 2:
+        raise ValueError("At least two calibration points must be used in regression.")
+    validated["linear_formula_point_matrix"] = normalized_matrix
+    return validated
 
 
 def apply_settings(interface_module, settings):
