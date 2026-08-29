@@ -773,6 +773,7 @@ class YoloDetectionWorker(QObject):
             payload = self._build_payload(
                 results[0], settings, cv2, config_warnings=config_warnings
             )
+            payload["source_path"] = str(image_path)
             self.finished.emit(payload)
         except Exception as error:
             self.failed.emit("{}: {}".format(type(error).__name__, error))

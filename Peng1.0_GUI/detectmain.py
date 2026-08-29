@@ -53,6 +53,9 @@ class DetectMain(QWidget):
         self._calibration_source_image = None
         self._regression_result = None
         self._regression_dirty = False
+        self._detection_result = None
+        self._detection_dirty = False
+        self._last_completed_result_type = None
         self._last_calibration_directory = None
         self._active_worker_task = None
 
@@ -256,7 +259,7 @@ class DetectMain(QWidget):
         self.ui.pushButton_4.clicked.connect(self._start_linear_regression)
         self.ui.pushButton.clicked.connect(self._select_detection_image)
         self.ui.pushButton_7.clicked.connect(self._plot_regression_result)
-        self.ui.pushButton_8.clicked.connect(self._save_linear_result)
+        self.ui.pushButton_8.clicked.connect(self._save_pending_result)
         self._reset_calibration_ui()
         app = QCoreApplication.instance()
         if app is not None:
@@ -288,6 +291,11 @@ class DetectMain(QWidget):
         "standard_curve.png",
         "calibration_annotated.png",
     )
+    DETECTION_TABLE_HEADERS = (
+        "Name", "No.", "Con.", "Red", "Green", "Blue", None,
+        "x0_con", "y0_con", "x1_con", "y1_con", "w_con", "h_con",
+    )
+    MAX_DETECTION_STEM_LENGTH = 100
 
     @staticmethod
     def _decode_calibration_image(image_path):
@@ -433,12 +441,38 @@ class DetectMain(QWidget):
             return False
         return True
 
+    def _pending_save_type(self):
+        if self._last_completed_result_type == "linear" and self._regression_dirty:
+            return "linear"
+        if self._last_completed_result_type == "detection" and self._detection_dirty:
+            return "detection"
+        if self._regression_dirty:
+            return "linear"
+        if self._detection_dirty:
+            return "detection"
+        return None
+
     def _update_save_button(self):
-        available = self._regression_dirty and self._has_valid_linear_export()
-        self.ui.pushButton_8.setText("Save Linear" if available else "Save")
-        self.ui.pushButton_8.setEnabled(
-            available and self._active_worker_task is None
-        )
+        pending = self._pending_save_type()
+        if pending == "linear":
+            text = "Save Linear"
+            available = self._has_valid_linear_export()
+        elif pending == "detection":
+            text = "Save Detection"
+            available = self._has_valid_detection_export()
+        else:
+            text = "Save"
+            available = False
+        self.ui.pushButton_8.setText(text)
+        self.ui.pushButton_8.setEnabled(available and self._active_worker_task is None)
+
+    @Slot()
+    def _save_pending_result(self):
+        pending = self._pending_save_type()
+        if pending == "linear":
+            self._save_linear_result()
+        elif pending == "detection":
+            self._save_detection_result()
 
     def _confirm_discard_unsaved_regression(self):
         if not self._regression_dirty:
@@ -451,6 +485,270 @@ class DetectMain(QWidget):
             QMessageBox.No,
         )
         return answer == QMessageBox.Yes
+
+    @classmethod
+    def _safe_detection_stem(cls, source_path):
+        stem = Path(source_path).stem
+        invalid = set('<>:"/\\|?*')
+        sanitized = "".join(
+            "_" if character in invalid or ord(character) < 32 or ord(character) == 127 else character
+            for character in stem
+        ).rstrip(" .")
+        if not sanitized:
+            sanitized = "detection_result"
+        reserved = {"CON", "PRN", "AUX", "NUL"}
+        reserved.update("COM{}".format(index) for index in range(1, 10))
+        reserved.update("LPT{}".format(index) for index in range(1, 10))
+        if sanitized.split(".", 1)[0].upper() in reserved:
+            sanitized = "_" + sanitized
+        sanitized = sanitized[:cls.MAX_DETECTION_STEM_LENGTH].rstrip(" .")
+        return sanitized or "detection_result"
+
+    def _validated_detection_export_payload(self):
+        payload = self._detection_result
+        if not isinstance(payload, dict):
+            raise ValueError("No detection result is available.")
+        source_path = payload.get("source_path")
+        if not isinstance(source_path, str) or not source_path.strip():
+            raise ValueError("The detection source path is missing.")
+        if not Path(source_path).is_file():
+            raise ValueError("The detection source image no longer exists: {}".format(source_path))
+        image = payload.get("image")
+        if not isinstance(image, np.ndarray) or image.ndim != 3 or image.size == 0:
+            raise ValueError("The detection annotated image is invalid.")
+        if image.shape[2] not in (3, 4):
+            raise ValueError("The detection annotated image has an unsupported channel count.")
+        targets = payload.get("targets")
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("At least one valid detection target is required.")
+
+        validated_targets = []
+        numeric_fields = ("No.", "Con.", "Red", "Green", "Blue")
+        for index, target in enumerate(targets, start=1):
+            if not isinstance(target, dict):
+                raise ValueError("Detection target {} is invalid.".format(index))
+            validated = {}
+            for field in numeric_fields:
+                value = target.get(field)
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError("Detection target {} field {} must be numeric.".format(index, field))
+                if not math.isfinite(float(value)):
+                    raise ValueError("Detection target {} field {} must be finite.".format(index, field))
+                validated[field] = value
+            roi = target.get("rgb_roi")
+            if not isinstance(roi, (tuple, list)) or len(roi) != 4:
+                raise ValueError("Detection target {} rgb_roi is invalid.".format(index))
+            coordinates = []
+            for value in roi:
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError("Detection target {} rgb_roi must be numeric.".format(index))
+                if not math.isfinite(float(value)):
+                    raise ValueError("Detection target {} rgb_roi must be finite.".format(index))
+                coordinates.append(value)
+            x0, y0, x1, y1 = coordinates
+            if x1 <= x0 or y1 <= y0:
+                raise ValueError("Detection target {} rgb_roi must have positive dimensions.".format(index))
+            validated["rgb_roi"] = tuple(coordinates)
+            validated_targets.append(validated)
+        return {
+            "source_path": source_path,
+            "source_stem": Path(source_path).stem,
+            "safe_stem": self._safe_detection_stem(source_path),
+            "image": image,
+            "targets": validated_targets,
+        }
+
+    def _has_valid_detection_export(self):
+        try:
+            self._validated_detection_export_payload()
+        except ValueError:
+            return False
+        return True
+
+    def _is_valid_detection_payload(self, payload):
+        previous = self._detection_result
+        self._detection_result = payload
+        try:
+            return self._has_valid_detection_export()
+        finally:
+            self._detection_result = previous
+
+    @classmethod
+    def _build_detection_workbook_bytes(cls, export_payload):
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Sheet1"
+        for column, header in enumerate(cls.DETECTION_TABLE_HEADERS, start=1):
+            if header is not None:
+                worksheet.cell(1, column, header)
+        for row_index, target in enumerate(export_payload["targets"], start=2):
+            x0, y0, x1, y1 = target["rgb_roi"]
+            values = (
+                export_payload["source_stem"], target["No."], target["Con."],
+                target["Red"], target["Green"], target["Blue"], None,
+                x0, y0, x1, y1, x1 - x0, y1 - y0,
+            )
+            for column, value in enumerate(values, start=1):
+                if value is not None:
+                    worksheet.cell(row_index, column, value)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        workbook.close()
+        return buffer.getvalue()
+
+    @classmethod
+    def _validate_detection_workbook_bytes(cls, workbook_bytes, export_payload):
+        def values_match(actual, expected):
+            if isinstance(expected, numbers.Real) and not isinstance(expected, bool):
+                return (
+                    isinstance(actual, numbers.Real)
+                    and not isinstance(actual, bool)
+                    and math.isclose(float(actual), float(expected), rel_tol=1e-15, abs_tol=0.0)
+                )
+            return actual == expected
+
+        workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), read_only=True, data_only=True)
+        try:
+            if workbook.sheetnames != ["Sheet1"]:
+                raise ValueError("The detection workbook must contain only Sheet1.")
+            worksheet = workbook["Sheet1"]
+            headers = tuple(worksheet.cell(1, column).value for column in range(1, 14))
+            if headers != cls.DETECTION_TABLE_HEADERS:
+                raise ValueError("The detection workbook headers A1:M1 are invalid.")
+            for row_index, target in enumerate(export_payload["targets"], start=2):
+                x0, y0, x1, y1 = target["rgb_roi"]
+                expected = (
+                    export_payload["source_stem"], target["No."], target["Con."],
+                    target["Red"], target["Green"], target["Blue"], None,
+                    x0, y0, x1, y1, x1 - x0, y1 - y0,
+                )
+                actual = tuple(worksheet.cell(row_index, column).value for column in range(1, 14))
+                if not all(values_match(value, wanted) for value, wanted in zip(actual, expected)):
+                    raise ValueError("Detection workbook row {} does not match the payload.".format(row_index))
+                if worksheet.cell(row_index, 7).value is not None:
+                    raise ValueError("Detection workbook column G must remain empty.")
+        finally:
+            workbook.close()
+
+    @classmethod
+    def _build_detection_export_bytes(cls, export_payload):
+        workbook_bytes = cls._build_detection_workbook_bytes(export_payload)
+        cls._validate_detection_workbook_bytes(workbook_bytes, export_payload)
+        import cv2
+        success, encoded = cv2.imencode(".png", export_payload["image"])
+        if not success or encoded.size == 0:
+            raise ValueError("The detection annotated PNG could not be encoded.")
+        png_bytes = encoded.tobytes()
+        decoded = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if decoded is None or not np.array_equal(decoded, export_payload["image"]):
+            raise ValueError("The detection annotated PNG failed color verification.")
+        return workbook_bytes, png_bytes
+
+    @staticmethod
+    def _commit_detection_export(target_directory, safe_stem, workbook_bytes, png_bytes):
+        target_directory.mkdir(parents=True, exist_ok=True)
+        transaction_path = Path(tempfile.mkdtemp(prefix=".save-detection-", dir=str(target_directory)))
+        staged_xlsx = transaction_path / "result.xlsx"
+        staged_png = transaction_path / "result.png"
+        preserve_transaction = False
+        committed_pair = None
+        try:
+            staged_xlsx.write_bytes(workbook_bytes)
+            staged_png.write_bytes(png_bytes)
+            if staged_xlsx.read_bytes() != workbook_bytes or staged_png.read_bytes() != png_bytes:
+                raise RuntimeError("Detection staging verification failed.")
+            index = 0
+            while True:
+                candidate = safe_stem if index == 0 else "{}_{}".format(safe_stem, index)
+                final_xlsx = target_directory / "{}.xlsx".format(candidate)
+                final_png = target_directory / "{}.png".format(candidate)
+                if final_xlsx.exists() or final_png.exists():
+                    index += 1
+                    continue
+                try:
+                    os.link(str(staged_xlsx), str(final_xlsx))
+                except FileExistsError:
+                    index += 1
+                    continue
+                try:
+                    os.link(str(staged_png), str(final_png))
+                except FileExistsError:
+                    try:
+                        final_xlsx.unlink()
+                    except OSError as rollback_error:
+                        preserve_transaction = True
+                        raise RuntimeError(
+                            "A competing file was detected and rollback failed. Recovery files are in {}: {}".format(
+                                transaction_path, rollback_error
+                            )
+                        ) from rollback_error
+                    index += 1
+                    continue
+                except Exception as error:
+                    try:
+                        final_xlsx.unlink()
+                    except OSError as rollback_error:
+                        preserve_transaction = True
+                        raise RuntimeError(
+                            "Detection save failed and rollback was incomplete. Recovery files are in {}: {}".format(
+                                transaction_path, rollback_error
+                            )
+                        ) from error
+                    raise RuntimeError("Detection PNG commit failed; the Excel file was removed: {}".format(error)) from error
+                committed_pair = (final_xlsx, final_png)
+                break
+        except Exception as error:
+            if transaction_path.exists() and not preserve_transaction:
+                try:
+                    shutil.rmtree(transaction_path)
+                except OSError as cleanup_error:
+                    raise RuntimeError(
+                        "Detection save failed and transaction cleanup was incomplete. Recovery files are in {}: {}".format(
+                            transaction_path, cleanup_error
+                        )
+                    ) from error
+            raise
+        try:
+            shutil.rmtree(transaction_path)
+        except OSError as cleanup_error:
+            raise RuntimeError(
+                "Detection files were committed, but transaction cleanup failed. Recovery files are in {}: {}".format(
+                    transaction_path, cleanup_error
+                )
+            ) from cleanup_error
+        return committed_pair
+
+    @Slot()
+    def _save_detection_result(self):
+        if self._active_worker_task is not None:
+            return
+        try:
+            export_payload = self._validated_detection_export_payload()
+        except ValueError as error:
+            self._detection_dirty = bool(self._detection_result)
+            self._update_save_button()
+            QMessageBox.critical(self, "Save Detection error", str(error))
+            return
+        repository_root = Path(__file__).resolve().parent.parent
+        target_directory = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results" / "detection"
+        self._set_active_worker_task("save_detection")
+        try:
+            workbook_bytes, png_bytes = self._build_detection_export_bytes(export_payload)
+            final_xlsx, final_png = self._commit_detection_export(
+                target_directory, export_payload["safe_stem"], workbook_bytes, png_bytes
+            )
+        except Exception as error:
+            self._detection_dirty = True
+            self._set_active_worker_task(None)
+            QMessageBox.critical(self, "Save Detection error", str(error))
+            return
+        self._detection_dirty = False
+        self._set_active_worker_task(None)
+        QMessageBox.information(
+            self,
+            "Save Detection",
+            "Detection results were saved to:\n{}\n{}".format(final_xlsx, final_png),
+        )
 
     @classmethod
     def _build_linear_workbook_bytes(cls, export_payload):
@@ -754,7 +1052,7 @@ class DetectMain(QWidget):
         self._update_save_button()
 
     def _set_active_worker_task(self, task):
-        if task not in (None, "detection", "regression", "save_linear"):
+        if task not in (None, "detection", "regression", "save_linear", "save_detection"):
             raise ValueError("Unknown worker task: {}".format(task))
         self._active_worker_task = task
         busy = task is not None
@@ -876,6 +1174,16 @@ class DetectMain(QWidget):
         if self._active_worker_task is not None:
             QMessageBox.warning(self, "Detection", "Another task is already running.")
             return
+        if self._detection_dirty:
+            answer = QMessageBox.question(
+                self,
+                "Unsaved detection result",
+                "当前检测结果尚未保存，继续检测将丢弃该结果。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
         image_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select an image for detection",
@@ -930,6 +1238,11 @@ class DetectMain(QWidget):
             QHeaderView.Stretch
         )
 
+        if payload["targets"] and self._is_valid_detection_payload(payload):
+            self._detection_result = payload
+            self._detection_dirty = True
+            self._last_completed_result_type = "detection"
+
         warnings = [str(message) for message in payload.get("warnings", []) if message]
         if warnings:
             QMessageBox.warning(self, "Detection warning", "\n".join(warnings))
@@ -948,6 +1261,7 @@ class DetectMain(QWidget):
         self.ui.progressBar.setValue(100)
         self._regression_result = payload
         self._regression_dirty = True
+        self._last_completed_result_type = "linear"
         self.origImg = payload["image"]
         self._origPixmap = self._bgr_image_to_pixmap(payload["image"])
         self._scale_label(self.ui.labelOrigImg)
