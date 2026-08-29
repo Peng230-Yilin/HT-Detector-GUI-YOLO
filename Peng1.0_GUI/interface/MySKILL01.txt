@@ -1,0 +1,46 @@
+需要执行的功能是：用新的计算机语言、技术路线和框架改写现有的代码，实现同样的界面功能。
+
+现有代码的路径为：./HT-Detector_GUI/
+现有代码是在QtCreator里面运行的，采用的是python语言，主要库采用的是PySide6。
+
+新生成的代码放在以下路径中：./HT-Detector-GUI1.0
+
+新的计算机语言和技术路线和框架，以及界面的风格深度参考如下两个项目，请仔细阅读这个两个项目，两个项目的路径分别为：./webRecorder 和 ./lab_OS
+
+程序最后生成的界面图需要跟我提供的图片一样，我提供的图片路径为： ./reference/interface/finalUI.png
+
+
+Linear Regression Image 区域的Image的存放路径为：./interface/linear/image/linear_regression_image.jpg
+
+Table. Linear Regression 区域的table存放路径为：./interface/linear/table/linear_regression_table.xlsx
+其中上述table区域的数字部分显示为2位有效数字，按照科学计数法四舍五入。table区域可以手动调整列之间的间距
+
+Detection Image 区域的Image的存放路径为：./interface/detect/image/detection_image.jpg
+Detection Image 区域下面有一个进度条，设置为100%，Period里面的时候从以下路径读出并显示：./interface/detect/time.txt
+
+Table. Detection 区域的table存放路径为：./interface/detect/table/detection_table.xlsx
+其中上述table区域的数字部分显示为2位有效数字，按照科学计数法四舍五入。table区域可以手动调整列之间的间距
+
+
+摄像头模块默认用原始照片显示，原始照片的路径为：./interface/origin/image/origin_image.jpg
+
+显示曲线（figure）的区域用所有数据和文字说明都放在了excel文件中，该文件的路径为：./interface/figure/linear_detection_result.xlsx
+	excel中保存的内容功能如下：
+		1. 单元格A1存放 figure_title，B1存放figure_title的内容
+		2. 单元格A2存放 x_axis，B2存放 x_axis的内容
+		3. 单元格A3存放 y_axis，B3存放y_axis的内容
+		4. 单元格A6，B6和D6的各自列后面的数据，分别存放的是x_value_linear，y_value_linear和y_value_detect的数据内容，
+		5. y_value_linear vs. x_value_linear to calculate the linear regression;
+		6. use the linear equation  and the y_value_detect data to calculate the second x_value_detect. and display these pairs in the figure.
+		7. display the linear regression equation and the R^2 in the figure. 
+figure区域的所有数字计算时不要四舍五入。
+
+
+
+
+
+
+
+
+
+

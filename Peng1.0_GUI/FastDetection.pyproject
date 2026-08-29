@@ -1,0 +1,3 @@
+{
+    "files": ["img.qrc","detection.py","main.py","ui/detectwindow.ui","detectfile.py","ui/camera.ui","ui/detectmain.ui","ui/detectfile.ui","detectmain.py","detectionwindow.py","camera.py"]
+}

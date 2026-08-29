@@ -1,0 +1,130 @@
+
+现有代码是在QtCreator里面运行的，采用的是python语言，主要库采用的是PySide6。
+
+
+Linear Regression Image 区域的Image的存放路径为：./interface/linear/image/linear_regression_image.jpg
+
+Table. Linear Regression 区域的table存放路径为：./interface/linear/table/linear_regression_table.xlsx
+
+Detection Image 区域的Image的存放路径为：./interface/detect/image/detection_image.jpg
+Detection Image 区域下面有一个进度条，设置为100%，Period里面的时候从以下路径读出并显示：./interface/detect/time.txt
+
+Table. Detection 区域的table存放路径为：./interface/detect/table/detection_table.xlsx
+
+
+主要修改的文件路径：C:\Users\yue\Desktop\newPeng\Peng1.0_GUI\detectmain.py
+程序中包含5组关键数据，num代表数据列的个数，con代表浓度列的数据，green，blue，red或（rgb_G, rgb_B, rgb_R）列数据分别代表图像的绿色、蓝色和红色三个通道的数据。
+程序中包含了两种相近的数据，第一种是用来做线性回归的数据，包括num，con，green，blue，和red数据；第一种是用来做浓度预测的数据，包括num，con，green，blue，和red数据（可以忽略其中的浓度数据，需要用程序计算得出）；
+程序的主要功能是，根据给定数据，即做线性回归用的浓度值和对应的RGB数据，来计算出线性回归曲线，计算线性回归曲线时采用单个颜色通道数据和浓度来计算，x轴是浓度数据，y轴是单一的颜色通道数据（green，blue 或red三选一）。
+得到线性回归曲线之后，选用单一颜色通道，作为已知的y值，带入计算线性回归曲线公式，来计算需要预测的浓度。
+
+需要更改的第一部分：
+原程序中所有线性回归数据和浓度预测数据都是写死在程序中的，
+我现在希望不再用写死在程序中的数据，而是从excel表中分别读取线性回归数据和浓度预测数据；
+线性回归数据存放在./interface/linear/table/linear_regression_table.xlsx中，
+浓度预测数据存放在./interface/detect/table/detection_table.xlsx中
+原程序和excel中的数据对应方式为：num对应No.，con对应Con., green，blue，red或（rgb_G, rgb_B, rgb_R）分别对应 Green，Blue，Red。
+在线性回归过程和浓度预测过程中，单一颜色通道的选择标准为，均选择excel表中紧随Con.列的单一颜色通道数据，即Con.列右边第一列颜色通道的数据。
+
+需要更改的第二部分：
+原程序中在界面中显示表格时，即两个表格区域：Table. Linear Regression区域和Table. Detection 区域分别 采用了固定写死的顺序；
+我现在希望两个区域显示表格时采用从excel表格中读取数据并显示的方式，各列的显示顺序和excel表格中的顺序一致。其中Con.， Green, Blue, Red列的数据均采用保留小数点后两位有效数字的形式显示，四舍五入。No.列用整数显示。
+Table. Linear Regression区域和Table. Detection 区域分别显示./interface/linear/only_table/linear_regression_table.xlsx和./interface/detect/only_table/detection_table.xlsx中读取的数据。
+
+注意：除了我标明的显示时采用两位有效小数的地方，其余程序中读取表格和使用数据的时候均不能采用四舍五入的形式，均保留excel中数据的原有有效位数。
+
+遍历整个project，开始修改。
+
+
+
+主要修改的文件路径：C:\Users\yue\Desktop\newPeng\Peng1.0_GUI\detectmain.py
+第142和143行，修改为既可以导入png格式又可以导入jpg格式的图片。
+
+修改代码，使得Linear Regression Image 区域的Image和Detection Image 区域的Image在整个窗口调整的过程中，图片能等比例调整大小，并且能在不改变纵横比的条件下，填充满整个图片区域。
+在显示线性回归的区域，线性数据点的颜色和线性回归曲线的颜色要跟所选用作线性回归的颜色通道的颜色一致。
+在线性回归的曲线区域，显示公式的背景色也设置为所选用作线性回归的颜色通道的颜色，并且透明度设置为50%。
+公式显示的位置不要与曲线重叠。
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值不要与点重合。
+
+
+修改代码，使得Linear Regression Image 区域的Image和Detection Image 区域的Image在系统（app）窗口调整的过程中，图片能等比例调整大小，并且能在不改变纵横比的条件下，填充满整个图片区域。
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值不要与点重合，不同点的各自文字不要重合，不要与线性回归曲线重合。
+
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值的文字部分，按照x值从小到大的顺序在图上从左到右依次显示，不同点的文字之间不允许相互覆盖，文字在相应的数据点附近，去掉连接文字和相应数据点的直线。
+
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值的文字部分，整体向左下部移动一些，不要超过画图的边框，并且每个点的文字之间一定不能重叠，现在有三个非常相近的点在y方向有重叠。
+
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值的文字部分，再离数据点近一些，保证各点对应的文字在x和y方向上都不重叠，用浅灰色虚线连接数据点和各自对应的文字。
+点击运行程序按钮时，现在会显示一个figure，我需要关闭这个figure.
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值的文字部分，数据点的文字再缩小一号，调整位置保证不同坐标点的文字位置在y轴上互不重叠，现在还是有重叠。
+
+浓度回归的结果显示在曲线区域时，标记的相应的(x,y)坐标值不要与点重合，不同点的各自文字不要重合，不要与线性回归曲线重合，现在还是有部分重合。
+浓度回归点和文字的颜色要与线性回归曲线的颜色区别明显一些。
+
+
+原程序的功能是将线性识别
+
+
+./interface/linear/table/linear_regression_table.xlsx
+
+
+
+./interface/detect/table/detection_table.xlsx
+
+
+
+
+主要修改的文件路径：C:\Users\yue\Desktop\newPeng\Peng1.0_GUI\detectmain.py
+原程序第58-63行：
+        num = [1, 2, 3, 4, 5]
+        con = [1, 10, 20, 30, 40]
+        green = [79.48, 90.13, 102.62, 124.11, 146.29]
+        blue = [74.04, 78.43, 90.29, 110.84, 132.29]
+        red = [79.49, 90.13, 102.45, 125.30, 145.29]
+        cols = 5
+更改为非固定的内容，内容从excel表中读取出来，表格路径是：./interface/linear/table/linear_regression_table.xlsx
+原程序第79-83行：
+        model.setHeaderData(0, Qt.Horizontal, "No.")
+        model.setHeaderData(1, Qt.Horizontal, "Con.")
+        model.setHeaderData(2, Qt.Horizontal, "Green")
+        model.setHeaderData(3, Qt.Horizontal, "Blue")
+        model.setHeaderData(4, Qt.Horizontal, "Red")
+更改为每列显示的顺序跟随excel表格中的顺序。
+
+
+原程序第103和104行：
+        x = [1, 10, 20, 30, 40]
+        y = [79.4798923817615, 90.1310552500655, 102.6154051172710, 124.1063063063060, 146.2869718309860]
+x和y行分别是从./interface/linear/table/linear_regression_table.xlsx中读取出来内容，对应着Con.列和紧随其后的一列的数据。
+
+原程序的第115行，164行-166行改为
+
+
+
+摄像头模块默认用原始照片显示，原始照片的路径为：./interface/origin/image/origin_image.jpg
+
+显示曲线（figure）的区域用所有数据和文字说明都放在了excel文件中，该文件的路径为：./interface/figure/linear_detection_result.xlsx
+	excel中保存的内容功能如下：
+		1. 单元格A1存放 figure_title，B1存放figure_title的内容
+		2. 单元格A2存放 x_axis，B2存放 x_axis的内容
+		3. 单元格A3存放 y_axis，B3存放y_axis的内容
+		4. 单元格A6，B6和D6的各自列后面的数据，分别存放的是x_value_linear，y_value_linear和y_value_detect的数据内容，
+		5. y_value_linear vs. x_value_linear to calculate the linear regression;
+		6. use the linear equation  and the y_value_detect data to calculate the second x_value_detect. and display these pairs in the figure.
+		7. display the linear regression equation and the R^2 in the figure. 
+figure区域的所有数字计算时不要四舍五入。
+
+
+只修改以下问题，不改动其他内容。
+拉动左右两个区域之间的间隔，能够改变两个区域的大小。现在程序中这种间隔不能被拉动，所以左右两边的区域大小不能被改变。
+左右区域分别是：
+Linear Regression Image区域和Table. Linear Regression区域；
+摄像头模块区域和Image、Video区域；
+Detection Image区域和Table. Detection区域。
+
+
+
+
+
+
+
