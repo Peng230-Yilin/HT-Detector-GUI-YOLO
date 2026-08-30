@@ -306,6 +306,12 @@ class YoloDetectionWorker(QObject):
         self._active_formulas = None
 
     @Slot(object)
+    def restore_active_formulas(self, formulas):
+        self._active_formulas = self._validated_formulas(
+            formulas, "restored regression formulas"
+        )
+
+    @Slot(object)
     def install_saved_formulas(self, formulas):
         validated = self._validated_formulas(formulas, "saved regression formulas")
         self._active_formulas = validated

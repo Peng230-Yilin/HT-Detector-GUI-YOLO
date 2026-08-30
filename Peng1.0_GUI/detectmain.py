@@ -37,11 +37,15 @@ from interface_config import load_effective_settings
 from yolo_detection_worker import YoloDetectionWorker
 
 
+_USE_CURRENT_RESULT = object()
+
+
 class DetectMain(QWidget):
     detection_requested = Signal(str, str)
     regression_requested = Signal(str, str)
     clear_active_formulas_requested = Signal()
     install_saved_formulas_requested = Signal(object)
+    restore_active_formulas_requested = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -75,6 +79,7 @@ class DetectMain(QWidget):
         self.figure, self.ax = plt.subplots(figsize=(15,15), dpi=100)#nrows=1, ncols=1,figsize=(15,10))#figsize=(20,15))
         self.canvas = FigureCanvasQTAgg(self.figure)
         self._regression_suptitle = None
+        self._regression_plot_has_result = False
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.layout.addWidget(self.canvas)
 #        self.layout.addWidget(self.toolbar)
@@ -246,6 +251,9 @@ class DetectMain(QWidget):
         self.install_saved_formulas_requested.connect(
             self._detection_worker.install_saved_formulas
         )
+        self.restore_active_formulas_requested.connect(
+            self._detection_worker.restore_active_formulas
+        )
         self._detection_worker.finished.connect(self._on_detection_finished)
         self._detection_worker.failed.connect(self._on_detection_failed)
         self._detection_worker.regression_finished.connect(
@@ -344,6 +352,7 @@ class DetectMain(QWidget):
         )
         self.ax.set_axis_off()
         self.canvas.draw()
+        self._regression_plot_has_result = False
 
     def _clear_calibration_results(self):
         self._regression_result = None
@@ -355,8 +364,9 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(False)
         self._update_save_button()
 
-    def _validated_linear_export_payload(self):
-        payload = self._regression_result
+    def _validated_linear_export_payload(self, payload=_USE_CURRENT_RESULT):
+        if payload is _USE_CURRENT_RESULT:
+            payload = self._regression_result
         if not isinstance(payload, dict):
             raise ValueError("No linear regression result is available.")
         source_path = payload.get("source_path")
@@ -504,8 +514,9 @@ class DetectMain(QWidget):
         sanitized = sanitized[:cls.MAX_DETECTION_STEM_LENGTH].rstrip(" .")
         return sanitized or "detection_result"
 
-    def _validated_detection_export_payload(self):
-        payload = self._detection_result
+    def _validated_detection_export_payload(self, payload=_USE_CURRENT_RESULT):
+        if payload is _USE_CURRENT_RESULT:
+            payload = self._detection_result
         if not isinstance(payload, dict):
             raise ValueError("No detection result is available.")
         source_path = payload.get("source_path")
@@ -518,6 +529,8 @@ class DetectMain(QWidget):
             raise ValueError("The detection annotated image is invalid.")
         if image.shape[2] not in (3, 4):
             raise ValueError("The detection annotated image has an unsupported channel count.")
+        if image.shape[2] != 3:
+            raise ValueError("The detection annotated image must be a three-channel BGR image.")
         targets = payload.get("targets")
         if not isinstance(targets, list) or not targets:
             raise ValueError("At least one valid detection target is required.")
@@ -1048,6 +1061,7 @@ class DetectMain(QWidget):
         self.ax.set_xlim(padded_limits(list(used_x) + list(line_x)))
         self.ax.set_ylim(padded_limits(list(used_y) + list(line_y)))
         self.canvas.draw()
+        self._regression_plot_has_result = True
         self.ui.pushButton_7.setEnabled(True)
         self._update_save_button()
 
@@ -1159,10 +1173,6 @@ class DetectMain(QWidget):
             )
             return
 
-        self._clear_calibration_results()
-        self._origPixmap = self._bgr_image_to_pixmap(self._calibration_source_image)
-        self.origImg = self._calibration_source_path
-        self._scale_label(self.ui.labelOrigImg)
         self.ui.progressBar.setRange(0, 0)
         self._set_active_worker_task("regression")
         self.regression_requested.emit(
@@ -1219,79 +1229,179 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_detection_finished(self, payload):
-        self.ui.progressBar.setRange(0, 100)
-        self.ui.progressBar.setValue(100)
+        try:
+            export_payload = self._validated_detection_export_payload(payload)
+            image = export_payload["image"]
+            pixmap = self._bgr_image_to_pixmap(image)
+            if pixmap.isNull():
+                raise ValueError("The detection annotated image could not be displayed.")
+            headers = ["No.", "Con.", "Red", "Green", "Blue"]
+            rows = [
+                tuple(target[header] for header in headers)
+                for target in export_payload["targets"]
+            ]
+            model = self._build_table_model(headers, rows)
 
-        image = payload["image"]
-        height, width, channels = image.shape
-        bytes_per_line = channels * width
-        qt_image = QImage(
-            image.data, width, height, bytes_per_line, QImage.Format_RGB888
-        ).rgbSwapped().copy()
-        self._recgPixmap = QPixmap.fromImage(qt_image)
-        self._scale_label(self.ui.labelRecgImg)
-
-        headers = ["No.", "Con.", "Red", "Green", "Blue"]
-        rows = [tuple(target[header] for header in headers) for target in payload["targets"]]
-        self._populate_tableview(self.ui.tabviewRecg, headers, rows)
-        self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
-
-        if payload["targets"] and self._is_valid_detection_payload(payload):
-            self._detection_result = payload
-            self._detection_dirty = True
-            self._last_completed_result_type = "detection"
-
-        warnings = [str(message) for message in payload.get("warnings", []) if message]
-        if warnings:
-            QMessageBox.warning(self, "Detection warning", "\n".join(warnings))
-        self._set_active_worker_task(None)
+            previous_result = self._detection_result
+            previous_dirty = self._detection_dirty
+            previous_type = self._last_completed_result_type
+            previous_pixmap = self._recgPixmap
+            previous_model = self.ui.tabviewRecg.model()
+            try:
+                self._recgPixmap = pixmap
+                self._scale_label(self.ui.labelRecgImg)
+                self.ui.tabviewRecg.setModel(model)
+                self.ui.tabviewRecg.verticalHeader().hide()
+                self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
+                    QHeaderView.Stretch
+                )
+                self._detection_result = payload
+                self._detection_dirty = True
+                self._last_completed_result_type = "detection"
+            except Exception:
+                self._detection_result = previous_result
+                self._detection_dirty = previous_dirty
+                self._last_completed_result_type = previous_type
+                self._recgPixmap = previous_pixmap
+                self.ui.tabviewRecg.setModel(previous_model)
+                self._scale_label(self.ui.labelRecgImg)
+                raise
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(100)
+            warnings = [str(message) for message in payload.get("warnings", []) if message]
+            if warnings:
+                self._show_message_safely(
+                    QMessageBox.warning, self, "Detection warning", "\n".join(warnings)
+                )
+        except Exception as error:
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(0)
+            self._show_message_safely(
+                QMessageBox.warning,
+                self,
+                "Detection warning",
+                "The new detection result was not accepted; the previous result was preserved.\n{}".format(
+                    error
+                ),
+            )
+        finally:
+            self._set_active_worker_task(None)
 
     @Slot(str)
     def _on_detection_failed(self, message):
-        self.ui.progressBar.setRange(0, 100)
-        self.ui.progressBar.setValue(0)
-        self._set_active_worker_task(None)
-        QMessageBox.critical(self, "Detection error", message)
+        try:
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(0)
+            self._show_message_safely(
+                QMessageBox.critical, self, "Detection error", message
+            )
+        finally:
+            self._set_active_worker_task(None)
 
     @Slot(object)
     def _on_regression_finished(self, payload):
-        self.ui.progressBar.setRange(0, 100)
-        self.ui.progressBar.setValue(100)
-        self._regression_result = payload
-        self._regression_dirty = True
-        self._last_completed_result_type = "linear"
-        self.origImg = payload["image"]
-        self._origPixmap = self._bgr_image_to_pixmap(payload["image"])
-        self._scale_label(self.ui.labelOrigImg)
+        previous_result = self._regression_result
+        previous_dirty = self._regression_dirty
+        previous_type = self._last_completed_result_type
+        previous_orig_img = self.origImg
+        previous_pixmap = self._origPixmap
+        previous_model = self.ui.tabviewOrig.model()
+        previous_plot_has_result = self._regression_plot_has_result
+        previous_elapsed = self.ui.lcdNumber.value()
+        try:
+            export_payload = self._validated_linear_export_payload(payload)
+            pixmap = self._bgr_image_to_pixmap(export_payload["image"])
+            if pixmap.isNull():
+                raise ValueError("The regression annotated image could not be displayed.")
+            headers = list(self.CALIBRATION_TABLE_HEADERS)
+            rows = [
+                tuple(sample[header] for header in headers)
+                for sample in export_payload["samples"]
+            ]
+            model = self._build_table_model(headers, rows)
 
-        headers = list(self.CALIBRATION_TABLE_HEADERS)
-        rows = [tuple(sample[header] for header in headers) for sample in payload["samples"]]
-        self._populate_tableview(self.ui.tabviewOrig, headers, rows)
-        self.ui.tabviewOrig.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
-        self.ui.lcdNumber.display(int(round(payload["elapsed_ms"])))
-        self._set_active_worker_task(None)
+            try:
+                self.origImg = export_payload["image"]
+                self._origPixmap = pixmap
+                self._scale_label(self.ui.labelOrigImg)
+                self.ui.tabviewOrig.setModel(model)
+                self.ui.tabviewOrig.verticalHeader().hide()
+                self.ui.tabviewOrig.horizontalHeader().setSectionResizeMode(
+                    QHeaderView.Stretch
+                )
+                self._regression_result = payload
+                self._regression_dirty = True
+                self._last_completed_result_type = "linear"
+                self._show_calibration_plot_placeholder()
+                self.ui.lcdNumber.display(int(round(payload["elapsed_ms"])))
+            except Exception:
+                self._regression_result = previous_result
+                self._regression_dirty = previous_dirty
+                self._last_completed_result_type = previous_type
+                self.origImg = previous_orig_img
+                self._origPixmap = previous_pixmap
+                self.ui.tabviewOrig.setModel(previous_model)
+                self._scale_label(self.ui.labelOrigImg)
+                self.ui.lcdNumber.display(previous_elapsed)
+                if previous_result is not None and previous_plot_has_result:
+                    self._plot_regression_result()
+                else:
+                    self._show_calibration_plot_placeholder()
+                raise
 
-        warnings = [str(message) for message in payload.get("warnings", []) if message]
-        if warnings:
-            QMessageBox.warning(self, "Linear regression warning", "\n".join(warnings))
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(100)
+            warnings = [str(message) for message in payload.get("warnings", []) if message]
+            if warnings:
+                self._show_message_safely(
+                    QMessageBox.warning,
+                    self,
+                    "Linear regression warning",
+                    "\n".join(warnings),
+                )
+        except Exception as error:
+            self._restore_previous_regression_formulas(previous_result, previous_dirty)
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(0)
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear regression error",
+                "The new regression result was not accepted; the previous result was preserved.\n{}".format(
+                    error
+                ),
+            )
+        finally:
+            self._set_active_worker_task(None)
 
     @Slot(str)
     def _on_regression_failed(self, message):
-        self.ui.progressBar.setRange(0, 100)
-        self.ui.progressBar.setValue(0)
-        self._clear_calibration_results()
-        if self._calibration_source_image is not None:
-            self.origImg = self._calibration_source_path
-            self._origPixmap = self._bgr_image_to_pixmap(
-                self._calibration_source_image
+        try:
+            self._restore_previous_regression_formulas(
+                self._regression_result, self._regression_dirty
             )
-            self._scale_label(self.ui.labelOrigImg)
-        self._set_active_worker_task(None)
-        QMessageBox.critical(self, "Linear regression error", message)
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(0)
+            self._show_message_safely(
+                QMessageBox.critical, self, "Linear regression error", message
+            )
+        finally:
+            self._set_active_worker_task(None)
+
+    def _restore_previous_regression_formulas(self, result, dirty):
+        if dirty and isinstance(result, dict):
+            formulas = result.get("formulas")
+            if isinstance(formulas, dict):
+                self.restore_active_formulas_requested.emit(formulas)
+                return
+        self.clear_active_formulas_requested.emit()
+
+    @staticmethod
+    def _show_message_safely(message_function, *args):
+        try:
+            message_function(*args)
+        except Exception:
+            pass
 
     @Slot()
     def _shutdown_detection_thread(self):
@@ -1429,7 +1539,7 @@ class DetectMain(QWidget):
         return headers.index("Con.") + 1
 
     @staticmethod
-    def _populate_tableview(view, headers, rows):
+    def _build_table_model(headers, rows):
         model = QStandardItemModel()
         model.setColumnCount(len(headers))
         for c, h in enumerate(headers):
@@ -1443,6 +1553,11 @@ class DetectMain(QWidget):
                 else:
                     text = "" if val is None else str(val)
                 model.setItem(r, c, QStandardItem(text))
+        return model
+
+    @classmethod
+    def _populate_tableview(cls, view, headers, rows):
+        model = cls._build_table_model(headers, rows)
         view.setModel(model)
         view.verticalHeader().hide()
         for c in range(len(headers)):
