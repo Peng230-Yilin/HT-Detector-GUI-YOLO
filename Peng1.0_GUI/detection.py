@@ -23,8 +23,7 @@ class Detection(QObject):
         main_window.show()
         return main_window
 
-    @Slot()
-    def _remove_window(self):
-        w = self.sender()
-        if w in self._windows:
-            del self._windows[self._windows.index(w)]
+    @Slot(object)
+    def _remove_window(self, window):
+        if window in self._windows:
+            self._windows.remove(window)

@@ -58,6 +58,8 @@ class DetectMain(QWidget):
     clear_active_formulas_requested = Signal()
     install_saved_formulas_requested = Signal(object)
     restore_active_formulas_requested = Signal(object)
+    worker_task_finished = Signal()
+    shutdown_ready = Signal()
 
     def __init__(self):
         super().__init__()
@@ -74,9 +76,15 @@ class DetectMain(QWidget):
         self._last_completed_result_type = None
         self._last_calibration_directory = None
         self._active_worker_task = None
+        self._close_wait_pending = False
+        self._shutdown_requested = False
+        self._thread_shutdown_complete = False
+        self._camera_shutdown_complete = False
+        self._shutdown_ready_emitted = False
 
 #        #put the cameraWidget in cameraMainlVLayout
         self.mainCamera = Camera()
+        self.mainCamera.shutdown_ready.connect(self._on_camera_shutdown_ready)
 #        self.ui.cameraMainGroupBox.setWidget(self.mainCamera._ui.cameraWidget)
         self.ui.cameraMainlVLayout.addWidget(self.mainCamera._ui.cameraWidget)
         self.ui.cameraMainlVLayout.setContentsMargins(0,0,0,0)
@@ -281,6 +289,7 @@ class DetectMain(QWidget):
         )
         self._detection_worker.regression_failed.connect(self._on_regression_failed)
         self._detection_thread.finished.connect(self._detection_worker.deleteLater)
+        self._detection_thread.finished.connect(self._on_detection_thread_finished)
         self._detection_thread.start()
 
         self.ui.pushButton_5.clicked.connect(self._select_calibration_image)
@@ -291,7 +300,7 @@ class DetectMain(QWidget):
         self._reset_calibration_ui()
         app = QCoreApplication.instance()
         if app is not None:
-            app.aboutToQuit.connect(self._shutdown_detection_thread)
+            app.aboutToQuit.connect(self.request_shutdown)
 
     CHANNEL_COLORS = {
         'Red':   '#d62728',
@@ -510,6 +519,8 @@ class DetectMain(QWidget):
 
     @Slot()
     def _save_pending_result(self):
+        if self._close_wait_pending or self._shutdown_requested:
+            return
         pending = self._pending_save_type()
         if pending == "linear":
             self._save_linear_result()
@@ -781,6 +792,8 @@ class DetectMain(QWidget):
 
     @Slot()
     def _save_detection_result(self):
+        if self._close_wait_pending or self._shutdown_requested:
+            return
         if self._active_worker_task is not None:
             return
         try:
@@ -1005,6 +1018,8 @@ class DetectMain(QWidget):
 
     @Slot()
     def _save_linear_result(self):
+        if self._close_wait_pending or self._shutdown_requested:
+            return
         if self._active_worker_task is not None:
             return
         try:
@@ -1190,8 +1205,13 @@ class DetectMain(QWidget):
     def _set_active_worker_task(self, task):
         if task not in (None, "detection", "regression", "save_linear", "save_detection"):
             raise ValueError("Unknown worker task: {}".format(task))
+        previous_task = self._active_worker_task
         self._active_worker_task = task
-        busy = task is not None
+        busy = (
+            task is not None
+            or self._close_wait_pending
+            or self._shutdown_requested
+        )
         self.ui.pushButton_5.setEnabled(not busy)
         self.ui.pushButton_4.setEnabled(
             not busy and self._calibration_source_path is not None
@@ -1201,6 +1221,18 @@ class DetectMain(QWidget):
             not busy and self._has_valid_regression_result()
         )
         self._update_save_button()
+        if previous_task is not None and task is None:
+            self.worker_task_finished.emit()
+
+    def is_worker_task_active(self):
+        return self._active_worker_task in ("detection", "regression")
+
+    def set_close_wait_pending(self, pending):
+        if self._shutdown_requested and pending:
+            return
+        self._close_wait_pending = bool(pending)
+        self.mainCamera.set_close_wait_pending(self._close_wait_pending)
+        self._set_active_worker_task(self._active_worker_task)
 
     def _reset_calibration_ui(self):
         self._calibration_source_path = None
@@ -1215,6 +1247,8 @@ class DetectMain(QWidget):
 
     @Slot()
     def _select_calibration_image(self):
+        if self._close_wait_pending or self._shutdown_requested:
+            return
         initial_directory = self._last_calibration_directory or ""
         image_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1250,6 +1284,8 @@ class DetectMain(QWidget):
 
     @Slot()
     def _start_linear_regression(self):
+        if self._close_wait_pending or self._shutdown_requested:
+            return
         if self._active_worker_task is not None:
             QMessageBox.warning(self, "Linear regression", "Another task is already running.")
             return
@@ -1303,6 +1339,8 @@ class DetectMain(QWidget):
 
     @Slot()
     def _select_detection_image(self):
+        if self._close_wait_pending or self._shutdown_requested:
+            return
         if self._active_worker_task is not None:
             QMessageBox.warning(self, "Detection", "Another task is already running.")
             return
@@ -1351,6 +1389,9 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_detection_finished(self, payload):
+        if self._close_wait_pending or self._shutdown_requested:
+            self._set_active_worker_task(None)
+            return
         try:
             export_payload = self._validated_detection_export_payload(payload)
             image = export_payload["image"]
@@ -1411,6 +1452,9 @@ class DetectMain(QWidget):
 
     @Slot(str)
     def _on_detection_failed(self, message):
+        if self._close_wait_pending or self._shutdown_requested:
+            self._set_active_worker_task(None)
+            return
         try:
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
@@ -1422,6 +1466,9 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_regression_finished(self, payload):
+        if self._close_wait_pending or self._shutdown_requested:
+            self._set_active_worker_task(None)
+            return
         previous_result = self._regression_result
         previous_dirty = self._regression_dirty
         previous_type = self._last_completed_result_type
@@ -1498,6 +1545,9 @@ class DetectMain(QWidget):
 
     @Slot(str)
     def _on_regression_failed(self, message):
+        if self._close_wait_pending or self._shutdown_requested:
+            self._set_active_worker_task(None)
+            return
         try:
             self._restore_previous_regression_formulas(
                 self._regression_result, self._regression_dirty
@@ -1526,10 +1576,39 @@ class DetectMain(QWidget):
             pass
 
     @Slot()
-    def _shutdown_detection_thread(self):
+    def request_shutdown(self):
+        if self._shutdown_requested:
+            self._maybe_emit_shutdown_ready()
+            return
+        self._shutdown_requested = True
+        self._close_wait_pending = False
+        self._set_active_worker_task(self._active_worker_task)
+        self.mainCamera.request_shutdown()
         if self._detection_thread.isRunning():
             self._detection_thread.quit()
-            self._detection_thread.wait()
+        else:
+            self._thread_shutdown_complete = True
+        self._maybe_emit_shutdown_ready()
+
+    @Slot()
+    def _on_detection_thread_finished(self):
+        self._thread_shutdown_complete = True
+        self._maybe_emit_shutdown_ready()
+
+    @Slot()
+    def _on_camera_shutdown_ready(self):
+        self._camera_shutdown_complete = True
+        self._maybe_emit_shutdown_ready()
+
+    def _maybe_emit_shutdown_ready(self):
+        if (
+            self._shutdown_requested
+            and self._thread_shutdown_complete
+            and self._camera_shutdown_complete
+            and not self._shutdown_ready_emitted
+        ):
+            self._shutdown_ready_emitted = True
+            self.shutdown_ready.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

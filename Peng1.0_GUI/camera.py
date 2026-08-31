@@ -13,7 +13,7 @@ from PySide6.QtMultimedia import (QAudioInput, QCamera, QCameraDevice,
                                   QMediaRecorder)
 from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox, QSplitter, QWidget
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QPixmap
-from PySide6.QtCore import QDateTime, QDir, QTimer, Qt, Slot, qWarning, QObject
+from PySide6.QtCore import QDateTime, QDir, QTimer, Qt, Signal, Slot, qWarning, QObject
 
 #from metadatadialog import MetaDataDialog
 #from imagesettings import ImageSettings
@@ -40,6 +40,8 @@ from PySide6.QtCore import QSize
 
 
 class Camera(QWidget):
+    shutdown_ready = Signal()
+
     def __init__(self):
         super().__init__()
 
@@ -54,6 +56,9 @@ class Camera(QWidget):
         self.m_isCapturingImage = False
         self.m_applicationExiting = False
         self.m_doImageCapture = True
+        self._close_wait_pending = False
+        self._shutdown_requested = False
+        self._shutdown_ready_emitted = False
 
         self.m_metaDataDialog = None
 
@@ -303,8 +308,12 @@ class Camera(QWidget):
 
     @Slot(int, QImageCapture.Error, str)
     def displayCaptureError(self, id, error, errorString):
-        QMessageBox.warning(self, "Image Capture Error", errorString)
+        if not self._modal_errors_suppressed():
+            QMessageBox.warning(self, "Image Capture Error", errorString)
         self.m_isCapturingImage = False
+        self._maybe_finish_shutdown()
+        if self.m_applicationExiting and not self._shutdown_requested:
+            self.close()
 
     @Slot()
     def startCamera(self):
@@ -331,6 +340,7 @@ class Camera(QWidget):
 #            self._ui.actionStopCamera.setEnabled(False)
             self._ui.captureWidget.setEnabled(False)
 #            self._ui.actionSettings.setEnabled(False)
+        self._maybe_finish_shutdown()
 
     @Slot(QMediaRecorder.RecorderState)
     def updateRecorderState(self, state):
@@ -349,6 +359,7 @@ class Camera(QWidget):
             self._ui.pauseButton.setEnabled(True)
             self._ui.stopButton.setEnabled(True)
             self._ui.metaDataButton.setEnabled(False)
+        self._maybe_finish_shutdown()
 
     @Slot(int)
     def setExposureCompensation(self, index):
@@ -357,14 +368,18 @@ class Camera(QWidget):
     @Slot()
     def displayRecorderError(self):
         if self.m_mediaRecorder.error() != QMediaRecorder.NoError:
-            QMessageBox.warning(self, "Capture Error",
-                                self.m_mediaRecorder.errorString())
+            if not self._modal_errors_suppressed():
+                QMessageBox.warning(self, "Capture Error",
+                                    self.m_mediaRecorder.errorString())
+            self._maybe_finish_shutdown()
 
     @Slot()
     def displayCameraError(self):
         if self.m_camera.error() != QCamera.NoError:
-            QMessageBox.warning(self, "Camera Error",
-                                self.m_camera.errorString())
+            if not self._modal_errors_suppressed():
+                QMessageBox.warning(self, "Camera Error",
+                                    self.m_camera.errorString())
+            self._maybe_finish_shutdown()
 
     @Slot(QAction)
     def updateCameraDevice(self, action):
@@ -388,8 +403,49 @@ class Camera(QWidget):
         self._ui.statusbar.showMessage(f"Captured \"{f}\"")
 
         self.m_isCapturingImage = False
-        if self.m_applicationExiting:
+        self._maybe_finish_shutdown()
+        if self.m_applicationExiting and not self._shutdown_requested:
             self.close()
+
+    @Slot()
+    def request_shutdown(self):
+        if self._shutdown_requested:
+            self._maybe_finish_shutdown()
+            return
+        self._shutdown_requested = True
+        self.m_applicationExiting = True
+        if (
+            self.m_mediaRecorder is not None
+            and self.m_mediaRecorder.recorderState() != QMediaRecorder.StoppedState
+        ):
+            self.m_mediaRecorder.stop()
+        if self.m_camera is not None and self.m_camera.isActive():
+            self.m_camera.stop()
+        self._maybe_finish_shutdown()
+
+    @Slot(bool)
+    def set_close_wait_pending(self, pending):
+        self._close_wait_pending = bool(pending)
+
+    def _modal_errors_suppressed(self):
+        return self._close_wait_pending or self._shutdown_requested
+
+    def _maybe_finish_shutdown(self):
+        if not getattr(self, "_shutdown_requested", False):
+            return
+        recorder_stopped = (
+            self.m_mediaRecorder is None
+            or self.m_mediaRecorder.recorderState() == QMediaRecorder.StoppedState
+        )
+        camera_stopped = self.m_camera is None or not self.m_camera.isActive()
+        if (
+            recorder_stopped
+            and camera_stopped
+            and not self.m_isCapturingImage
+            and not self._shutdown_ready_emitted
+        ):
+            self._shutdown_ready_emitted = True
+            self.shutdown_ready.emit()
 
     def closeEvent(self, event):
         if self.m_isCapturingImage:

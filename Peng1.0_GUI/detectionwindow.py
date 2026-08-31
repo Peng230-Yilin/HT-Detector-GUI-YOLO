@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QWidget,
                                 QTreeView, QFileSystemModel)
 from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence
-from PySide6.QtCore import QUrl, Qt, Slot, Signal, QDir, QSize
+from PySide6.QtCore import QUrl, Qt, Slot, Signal, QDir, QSize, QTimer
 
 from PySide6.QtPrintSupport import (QAbstractPrintDialog, QPrinter,
                                     QPrintDialog, QPrintPreviewDialog)
@@ -25,15 +25,26 @@ RSRC_PATH = ":/win"
 
 
 class DetectWindow(QMainWindow):
-    about_to_close = Signal()
+    about_to_close = Signal(object)
     def __init__(self, detection):
         super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._close_wait_pending = False
+        self._shutdown_started = False
+        self._final_close_allowed = False
+        self._about_to_close_emitted = False
+        self._close_wait_dialog = None
+        self._close_control_states = None
         self._uiWindow = ui_detectwindow.Ui_detectWindow()
         self._uiWindow.setupUi(self)
         self._detection = detection
 
         self._detectFile = DetectFile()
         self._detectMain = DetectMain()
+        self._detectMain.worker_task_finished.connect(
+            self._on_worker_task_finished
+        )
+        self._detectMain.shutdown_ready.connect(self._on_shutdown_ready)
 
         #set up the dockWidget in mainwindow -> filemanager
         self._uiWindow.dockWidget.setWidget(self._detectFile.ui.filemanagerTabWidget)
@@ -71,6 +82,143 @@ class DetectWindow(QMainWindow):
         self._uiWindow.actionPreferences.triggered.connect(
             self._open_interface_settings
         )
+
+    def closeEvent(self, event):
+        if self._final_close_allowed:
+            if not self._about_to_close_emitted:
+                self._about_to_close_emitted = True
+                self.about_to_close.emit(self)
+            event.accept()
+            return
+        if self._shutdown_started:
+            event.ignore()
+            return
+        if self._close_wait_pending:
+            event.ignore()
+            self._activate_close_wait_dialog()
+            return
+        if self._has_unsaved_results():
+            answer = QMessageBox.question(
+                self,
+                "Unsaved results",
+                "There are unsaved results. Discard them and close the window?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+        if self._detectMain.is_worker_task_active():
+            self._begin_close_wait()
+            event.ignore()
+            return
+        self._begin_shutdown()
+        event.ignore()
+
+    def _has_unsaved_results(self):
+        return bool(
+            self._detectMain._regression_dirty
+            or self._detectMain._detection_dirty
+        )
+
+    def _begin_close_wait(self):
+        if self._close_wait_pending or self._shutdown_started:
+            return
+        self._close_wait_pending = True
+        self._detectMain.set_close_wait_pending(True)
+        self._set_close_controls_disabled(True)
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Waiting to close")
+        dialog.setText(
+            "Current task is still running. The window will close safely when it finishes."
+        )
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setStandardButtons(QMessageBox.NoButton)
+        cancel_button = dialog.addButton("Cancel Close", QMessageBox.RejectRole)
+        cancel_button.clicked.connect(self._cancel_close_wait)
+        dialog.finished.connect(self._on_close_wait_dialog_finished)
+        dialog.setModal(False)
+        self._close_wait_dialog = dialog
+        dialog.show()
+
+    def _activate_close_wait_dialog(self):
+        if self._close_wait_dialog is not None:
+            self._close_wait_dialog.raise_()
+            self._close_wait_dialog.activateWindow()
+
+    @Slot()
+    def _cancel_close_wait(self):
+        if not self._close_wait_pending or self._shutdown_started:
+            return
+        self._close_wait_pending = False
+        self._dispose_close_wait_dialog()
+        self._detectMain.set_close_wait_pending(False)
+        self._set_close_controls_disabled(False)
+
+    @Slot(int)
+    def _on_close_wait_dialog_finished(self, _result):
+        if self._close_wait_dialog is not None:
+            self._cancel_close_wait()
+
+    @Slot()
+    def _on_worker_task_finished(self):
+        if not self._close_wait_pending or self._shutdown_started:
+            return
+        self._close_wait_pending = False
+        self._dispose_close_wait_dialog()
+        self._begin_shutdown()
+
+    def _begin_shutdown(self):
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        self._set_close_controls_disabled(True)
+        self._detectMain.request_shutdown()
+
+    @Slot()
+    def _on_shutdown_ready(self):
+        if not self._shutdown_started or self._final_close_allowed:
+            return
+        self._final_close_allowed = True
+        QTimer.singleShot(0, self.close)
+
+    def _dispose_close_wait_dialog(self):
+        if self._close_wait_dialog is None:
+            return
+        dialog = self._close_wait_dialog
+        self._close_wait_dialog = None
+        dialog.hide()
+        dialog.deleteLater()
+
+    def _set_close_controls_disabled(self, disabled):
+        actions = (
+            self._uiWindow.actionNew_Window,
+            self._uiWindow.actionOpen_File,
+            self._uiWindow.actionSave,
+            self._uiWindow.actionSave_As,
+            self._uiWindow.actionPrint,
+            self._uiWindow.actionPrint_Preview,
+            self._uiWindow.actionExport_Pdf,
+            self._uiWindow.actionPreferences,
+        )
+        if disabled:
+            if self._close_control_states is None:
+                camera_widget = self._detectMain.mainCamera._ui.cameraWidget
+                self._close_control_states = (
+                    tuple(action.isEnabled() for action in actions),
+                    camera_widget.isEnabled(),
+                )
+            for action in actions:
+                action.setEnabled(False)
+            self._detectMain.mainCamera._ui.cameraWidget.setEnabled(False)
+        elif self._close_control_states is not None:
+            action_states, camera_enabled = self._close_control_states
+            for action, enabled in zip(actions, action_states):
+                action.setEnabled(enabled)
+            self._detectMain.mainCamera._ui.cameraWidget.setEnabled(
+                camera_enabled
+            )
+            self._close_control_states = None
 
     @Slot(int)
     def onClickDir(self, index):
