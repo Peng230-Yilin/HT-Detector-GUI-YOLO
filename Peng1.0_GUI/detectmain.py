@@ -38,6 +38,7 @@ from yolo_detection_worker import YoloDetectionWorker
 
 
 _USE_CURRENT_RESULT = object()
+GUI_RESOURCE_ROOT = Path(__file__).resolve().parent
 
 
 class DetectMain(QWidget):
@@ -88,7 +89,9 @@ class DetectMain(QWidget):
 
 
         # Linear regression: read source data (full precision for the fit)
-        lin_headers, lin_rows = self._read_excel('./interface/linear/table/linear_regression_table.xlsx')
+        lin_headers, lin_rows = self._read_excel(
+            GUI_RESOURCE_ROOT / 'interface/linear/table/linear_regression_table.xlsx'
+        )
         ycol = self._first_color_index(lin_headers)
         con_lin = [r[lin_headers.index("Con.")] for r in lin_rows]
         y_channel = [r[ycol] for r in lin_rows]
@@ -98,7 +101,7 @@ class DetectMain(QWidget):
 
         # Linear regression display table: read from only_table/
         disp_headers, disp_rows = self._read_excel(
-            './interface/linear/only_table/linear_regression_table.xlsx')
+            GUI_RESOURCE_ROOT / 'interface/linear/only_table/linear_regression_table.xlsx')
         self._populate_tableview(self.ui.tabviewOrig, disp_headers, disp_rows)
 
 
@@ -123,7 +126,9 @@ class DetectMain(QWidget):
 #        print("y = {:.2f}*x+{:.2f}".format(slope, intercept))
 
         # Detection: read detection-source data, compute predicted concentrations
-        det_headers, det_rows = self._read_excel('./interface/detect/table/detection_table.xlsx')
+        det_headers, det_rows = self._read_excel(
+            GUI_RESOURCE_ROOT / 'interface/detect/table/detection_table.xlsx'
+        )
         dcol = self._first_color_index(det_headers)
         det_channel = [r[dcol] for r in det_rows]
         con_pred = [(v - intercept) / slope for v in det_channel]
@@ -210,17 +215,21 @@ class DetectMain(QWidget):
 
         # Detection display table: read from only_table/
         det_disp_headers, det_disp_rows = self._read_excel(
-            './interface/detect/only_table/detection_table.xlsx')
+            GUI_RESOURCE_ROOT / 'interface/detect/only_table/detection_table.xlsx')
         self._populate_tableview(self.ui.tabviewRecg, det_disp_headers, det_disp_rows)
         self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
 
 
-        self.origImg = self._resolve_image('./interface/linear/image/linear_regression_image')
-        self.recgImg = self._resolve_image('./interface/detect/image/detection_image')
-        self._origPixmap = QPixmap(self.origImg)
-        self._recgPixmap = QPixmap(self.recgImg)
+        self.origImg = self._resolve_image(
+            GUI_RESOURCE_ROOT / 'interface/linear/image/linear_regression_image'
+        )
+        self.recgImg = self._resolve_image(
+            GUI_RESOURCE_ROOT / 'interface/detect/image/detection_image'
+        )
+        self._origPixmap = QPixmap(str(self.origImg))
+        self._recgPixmap = QPixmap(str(self.recgImg))
         for lbl in (self.ui.labelOrigImg, self.ui.labelRecgImg):
             lbl.setMinimumSize(1, 1)
             lbl.setAlignment(Qt.AlignCenter)
@@ -232,7 +241,7 @@ class DetectMain(QWidget):
 
         self.ui.progressBar.setValue(100)
         try:
-            with open('./interface/detect/time.txt', 'r', encoding='utf-8') as f:
+            with open(GUI_RESOURCE_ROOT / 'interface/detect/time.txt', 'r', encoding='utf-8') as f:
                 raw = f.read().strip()
             digits = ''.join(ch for ch in raw if ch.isdigit())
             if digits:
@@ -1520,19 +1529,22 @@ class DetectMain(QWidget):
     @classmethod
     def _resolve_image(cls, base_no_ext):
         for ext in cls.IMAGE_EXTENSIONS:
-            candidate = base_no_ext + ext
+            candidate = Path('{}{}'.format(base_no_ext, ext))
             if os.path.exists(candidate):
                 return candidate
-        return base_no_ext + cls.IMAGE_EXTENSIONS[0]
+        return Path('{}{}'.format(base_no_ext, cls.IMAGE_EXTENSIONS[0]))
 
     @staticmethod
     def _read_excel(path):
         wb = openpyxl.load_workbook(path, data_only=True)
-        ws = wb.active
-        it = ws.iter_rows(values_only=True)
-        headers = [str(h) for h in next(it)]
-        rows = [r for r in it if any(c is not None for c in r)]
-        return headers, rows
+        try:
+            ws = wb.active
+            it = ws.iter_rows(values_only=True)
+            headers = [str(h) for h in next(it)]
+            rows = [r for r in it if any(c is not None for c in r)]
+            return headers, rows
+        finally:
+            wb.close()
 
     @staticmethod
     def _first_color_index(headers):

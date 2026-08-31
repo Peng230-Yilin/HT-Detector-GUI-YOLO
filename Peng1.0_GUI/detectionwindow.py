@@ -55,6 +55,17 @@ class DetectWindow(QMainWindow):
         self._detectFile.ui.fileListView.clicked.connect(self.onClickFile)
         self._detectFile.ui.extComboBox.textActivated.connect(self.onClickExt)
 
+        # Actions in the File menu are connected once per window instance.
+        self._uiWindow.actionNew_Window.triggered.connect(self.handle_new_window_triggered)
+        self._uiWindow.actionOpen_File.triggered.connect(self.handle_file_open_triggered)
+        self._uiWindow.actionSave.triggered.connect(self.file_save)
+        self._uiWindow.actionSave_As.triggered.connect(self.file_save_as)
+        self._uiWindow.actionPrint.triggered.connect(self.file_print)
+        self._uiWindow.actionPrint_Preview.triggered.connect(self.file_print_preview)
+        self._uiWindow.actionExport_Pdf.triggered.connect(self.file_print_pdf)
+        self._uiWindow.actionExit.triggered.connect(self.close)
+        self.onClickExt(self._detectFile.ui.extComboBox.currentText())
+
         self._interface_settings_dialog = None
         self._uiWindow.actionPreferences.setText("Interface")
         self._uiWindow.actionPreferences.triggered.connect(
@@ -79,47 +90,6 @@ class DetectWindow(QMainWindow):
 #        pass
         self._show_status_message(text)
         self._detectFile.fileModel.setNameFilters(text)
-
-
-
-
-
-
-        #Action in File menu
-        self._uiWindow.actionNew_Window.triggered.connect(self.handle_new_window_triggered)
-        self._uiWindow.actionOpen_File.triggered.connect(self.handle_file_open_triggered)
-        self._uiWindow.actionSave.triggered.connect(self.file_save)
-        self._uiWindow.actionSave_As.triggered.connect(self.file_save_as)
-        self._uiWindow.actionPrint.triggered.connect(self.file_print)
-        self._uiWindow.actionPrint_Preview.triggered.connect(self.file_print_preview)
-        self._uiWindow.actionExport_Pdf.triggered.connect(self.file_print_pdf)
-        self._uiWindow.actionExit.triggered.connect(self.close)
-
-        #Action in Edit menu
-#        self._uiWindow.actionUndo.triggered.connect(self.)
-#        self._uiWindow.actionRedo.connect(self.)
-#        self._uiWindow.actionCut.triggered.connect(self.)
-#        self._uiWindow.actionCopy.triggered.connect(self.)
-#        self._uiWindow.actionPaste.triggered.connect(self.)
-#        self._uiWindow.actionRemove.triggered.connect(self.)
-#        self._uiWindow.actionDelete.triggered.connect(self.)
-#        self._uiWindow.actionAdvanced.triggered.connect(self.)
-#        self._uiWindow.actionFind_Replace.triggered.connect(self.)
-#        self._uiWindow.actionPreferences.triggered.connect(self.)
-        #Action in View menu
-#        self._uiWindow.actionRefresh.triggered.connect(self.)
-#        self._uiWindow.actionFullscreen.triggered.connect(self.)
-#        self._uiWindow.actionRestore.triggered.connect(self.)
-#        self._uiWindow.actionZoom_In.triggered.connect(self.)
-#        self._uiWindow.actionZoom_Out.triggered.connect(self.)
-#        self._uiWindow.actionZoom_Original.triggered.connect(self.)
-#        self._uiWindow.actionZoom_Fit_Best.triggered.connect(self.)
-#        self._uiWindow.actionGoNext.triggered.connect(self.)
-#        self._uiWindow.actionGoPrevious.triggered.connect(self.)
-
-
-#        self._uiWindow.actionAbout_Qt_Creator.triggered.connect(self.)
-#        self._uiWindow..triggered.connect(self.)
 
     @Slot()
     def _open_interface_settings(self):
