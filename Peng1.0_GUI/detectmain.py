@@ -7,6 +7,7 @@ import math
 import numbers
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QDialog, QFontComboBox,QTextEdit, QInputDialog,
@@ -39,6 +40,16 @@ from yolo_detection_worker import YoloDetectionWorker
 
 _USE_CURRENT_RESULT = object()
 GUI_RESOURCE_ROOT = Path(__file__).resolve().parent
+
+
+@dataclass(frozen=True)
+class _SaveTransactionResult:
+    committed: bool
+    final_paths: tuple = ()
+    cleanup_warning: str = None
+    recovery_path: Path = None
+    rollback_complete: bool = None
+    rollback_errors: tuple = ()
 
 
 class DetectMain(QWidget):
@@ -373,16 +384,28 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(False)
         self._update_save_button()
 
+    @staticmethod
+    def _validated_source_path(source_path, description):
+        if not isinstance(source_path, str) or not source_path.strip():
+            raise ValueError("The {} source path is missing.".format(description))
+        stripped = source_path.strip()
+        if stripped.endswith(("/", "\\")):
+            raise ValueError("The {} source path has no file name.".format(description))
+        path = Path(stripped)
+        if not path.name or not path.stem or not path.stem.strip():
+            raise ValueError("The {} source path has no valid file name.".format(description))
+        if path.is_dir():
+            raise ValueError("The {} source path identifies a directory.".format(description))
+        return source_path
+
     def _validated_linear_export_payload(self, payload=_USE_CURRENT_RESULT):
         if payload is _USE_CURRENT_RESULT:
             payload = self._regression_result
         if not isinstance(payload, dict):
             raise ValueError("No linear regression result is available.")
-        source_path = payload.get("source_path")
-        if not isinstance(source_path, str) or not source_path.strip():
-            raise ValueError("The regression source path is missing.")
-        if not Path(source_path).is_file():
-            raise ValueError("The regression source image no longer exists: {}".format(source_path))
+        source_path = self._validated_source_path(
+            payload.get("source_path"), "regression"
+        )
 
         image = payload.get("image")
         if not isinstance(image, np.ndarray) or image.ndim != 3 or image.size == 0:
@@ -528,11 +551,9 @@ class DetectMain(QWidget):
             payload = self._detection_result
         if not isinstance(payload, dict):
             raise ValueError("No detection result is available.")
-        source_path = payload.get("source_path")
-        if not isinstance(source_path, str) or not source_path.strip():
-            raise ValueError("The detection source path is missing.")
-        if not Path(source_path).is_file():
-            raise ValueError("The detection source image no longer exists: {}".format(source_path))
+        source_path = self._validated_source_path(
+            payload.get("source_path"), "detection"
+        )
         image = payload.get("image")
         if not isinstance(image, np.ndarray) or image.ndim != 3 or image.size == 0:
             raise ValueError("The detection annotated image is invalid.")
@@ -672,8 +693,10 @@ class DetectMain(QWidget):
         transaction_path = Path(tempfile.mkdtemp(prefix=".save-detection-", dir=str(target_directory)))
         staged_xlsx = transaction_path / "result.xlsx"
         staged_png = transaction_path / "result.png"
-        preserve_transaction = False
-        committed_pair = None
+        final_paths = ()
+        failure = None
+        rollback_complete = None
+        rollback_errors = []
         try:
             staged_xlsx.write_bytes(workbook_bytes)
             staged_png.write_bytes(png_bytes)
@@ -698,47 +721,63 @@ class DetectMain(QWidget):
                     try:
                         final_xlsx.unlink()
                     except OSError as rollback_error:
-                        preserve_transaction = True
-                        raise RuntimeError(
-                            "A competing file was detected and rollback failed. Recovery files are in {}: {}".format(
-                                transaction_path, rollback_error
-                            )
-                        ) from rollback_error
+                        rollback_errors.append(
+                            "remove {}: {}".format(final_xlsx, rollback_error)
+                        )
+                        failure = RuntimeError("A competing file was detected.")
+                        rollback_complete = False
+                        break
                     index += 1
                     continue
                 except Exception as error:
                     try:
                         final_xlsx.unlink()
                     except OSError as rollback_error:
-                        preserve_transaction = True
-                        raise RuntimeError(
-                            "Detection save failed and rollback was incomplete. Recovery files are in {}: {}".format(
-                                transaction_path, rollback_error
-                            )
-                        ) from error
-                    raise RuntimeError("Detection PNG commit failed; the Excel file was removed: {}".format(error)) from error
-                committed_pair = (final_xlsx, final_png)
+                        rollback_errors.append(
+                            "remove {}: {}".format(final_xlsx, rollback_error)
+                        )
+                    failure = error
+                    rollback_complete = not rollback_errors
+                    break
+                final_paths = (final_xlsx, final_png)
                 break
         except Exception as error:
-            if transaction_path.exists() and not preserve_transaction:
-                try:
-                    shutil.rmtree(transaction_path)
-                except OSError as cleanup_error:
-                    raise RuntimeError(
-                        "Detection save failed and transaction cleanup was incomplete. Recovery files are in {}: {}".format(
-                            transaction_path, cleanup_error
-                        )
-                    ) from error
-            raise
-        try:
-            shutil.rmtree(transaction_path)
-        except OSError as cleanup_error:
-            raise RuntimeError(
-                "Detection files were committed, but transaction cleanup failed. Recovery files are in {}: {}".format(
-                    transaction_path, cleanup_error
+            failure = error
+            rollback_complete = True
+
+        if final_paths:
+            try:
+                shutil.rmtree(transaction_path)
+            except OSError as cleanup_error:
+                warning = "Results were saved, but the temporary directory cleanup failed: {}. Recovery directory: {}".format(
+                    cleanup_error, transaction_path
                 )
-            ) from cleanup_error
-        return committed_pair
+                return _SaveTransactionResult(
+                    True, final_paths, warning, transaction_path
+                )
+            return _SaveTransactionResult(True, final_paths)
+
+        cleanup_warning = None
+        recovery_path = None
+        if rollback_complete is not False:
+            try:
+                shutil.rmtree(transaction_path)
+            except OSError as cleanup_error:
+                cleanup_warning = "Transaction cleanup failed: {}. Recovery directory: {}".format(
+                    cleanup_error, transaction_path
+                )
+                recovery_path = transaction_path
+        else:
+            recovery_path = transaction_path
+        errors = [str(failure)] if failure is not None else []
+        errors.extend(rollback_errors)
+        return _SaveTransactionResult(
+            False,
+            cleanup_warning=cleanup_warning,
+            recovery_path=recovery_path,
+            rollback_complete=rollback_complete,
+            rollback_errors=tuple(errors),
+        )
 
     @Slot()
     def _save_detection_result(self):
@@ -755,22 +794,47 @@ class DetectMain(QWidget):
         target_directory = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results" / "detection"
         self._set_active_worker_task("save_detection")
         try:
-            workbook_bytes, png_bytes = self._build_detection_export_bytes(export_payload)
-            final_xlsx, final_png = self._commit_detection_export(
-                target_directory, export_payload["safe_stem"], workbook_bytes, png_bytes
-            )
-        except Exception as error:
-            self._detection_dirty = True
+            try:
+                workbook_bytes, png_bytes = self._build_detection_export_bytes(export_payload)
+                result = self._commit_detection_export(
+                    target_directory, export_payload["safe_stem"], workbook_bytes, png_bytes
+                )
+            except Exception as error:
+                result = _SaveTransactionResult(
+                    False, rollback_complete=True, rollback_errors=(str(error),)
+                )
+            if result.committed:
+                self._detection_dirty = False
+                final_xlsx, final_png = result.final_paths
+                message = "Detection results were saved to:\n{}\n{}".format(
+                    final_xlsx, final_png
+                )
+                if result.cleanup_warning:
+                    message += "\n\n{}".format(result.cleanup_warning)
+                    message_function = QMessageBox.warning
+                else:
+                    message_function = QMessageBox.information
+                self._show_message_safely(
+                    message_function, self, "Save Detection", message
+                )
+            else:
+                self._detection_dirty = True
+                message = "Detection results were not saved."
+                if result.rollback_complete:
+                    message += " This transaction's partial files were removed."
+                elif result.rollback_complete is False:
+                    message += " Rollback was incomplete."
+                if result.rollback_errors:
+                    message += "\n{}".format("\n".join(result.rollback_errors))
+                if result.cleanup_warning:
+                    message += "\n{}".format(result.cleanup_warning)
+                elif result.recovery_path is not None:
+                    message += "\nRecovery directory: {}".format(result.recovery_path)
+                self._show_message_safely(
+                    QMessageBox.critical, self, "Save Detection error", message
+                )
+        finally:
             self._set_active_worker_task(None)
-            QMessageBox.critical(self, "Save Detection error", str(error))
-            return
-        self._detection_dirty = False
-        self._set_active_worker_task(None)
-        QMessageBox.information(
-            self,
-            "Save Detection",
-            "Detection results were saved to:\n{}\n{}".format(final_xlsx, final_png),
-        )
 
     @classmethod
     def _build_linear_workbook_bytes(cls, export_payload):
@@ -881,6 +945,7 @@ class DetectMain(QWidget):
         backup_path.mkdir()
         backups = []
         committed = []
+        final_paths = tuple(target_directory / filename for filename in files)
         try:
             for filename, content in files.items():
                 (staged_path / filename).write_bytes(content)
@@ -905,14 +970,38 @@ class DetectMain(QWidget):
                 except OSError as rollback_error:
                     rollback_errors.append("restore {}: {}".format(filename, rollback_error))
             if rollback_errors:
-                raise RuntimeError(
-                    "Save failed and rollback was incomplete. Recovery files are in {}. {}".format(
-                        transaction_path, "; ".join(rollback_errors)
-                    )
-                ) from error
-            shutil.rmtree(transaction_path, ignore_errors=True)
-            raise RuntimeError("Save failed; all previous files were restored: {}".format(error)) from error
-        shutil.rmtree(transaction_path)
+                return _SaveTransactionResult(
+                    False,
+                    recovery_path=transaction_path,
+                    rollback_complete=False,
+                    rollback_errors=(str(error),) + tuple(rollback_errors),
+                )
+            try:
+                shutil.rmtree(transaction_path)
+            except OSError as cleanup_error:
+                warning = "Old files were fully restored, but transaction cleanup failed: {}. Recovery directory: {}".format(
+                    cleanup_error, transaction_path
+                )
+                return _SaveTransactionResult(
+                    False,
+                    cleanup_warning=warning,
+                    recovery_path=transaction_path,
+                    rollback_complete=True,
+                    rollback_errors=(str(error),),
+                )
+            return _SaveTransactionResult(
+                False, rollback_complete=True, rollback_errors=(str(error),)
+            )
+        try:
+            shutil.rmtree(transaction_path)
+        except OSError as cleanup_error:
+            warning = "Results were saved, but the temporary directory cleanup failed: {}. Recovery directory: {}".format(
+                cleanup_error, transaction_path
+            )
+            return _SaveTransactionResult(
+                True, final_paths, warning, transaction_path
+            )
+        return _SaveTransactionResult(True, final_paths)
 
     @Slot()
     def _save_linear_result(self):
@@ -945,20 +1034,44 @@ class DetectMain(QWidget):
 
         self._set_active_worker_task("save_linear")
         try:
-            files = self._build_linear_export_bytes(export_payload)
-            self._commit_linear_export(target_directory, files)
-        except Exception as error:
-            self._regression_dirty = True
+            try:
+                files = self._build_linear_export_bytes(export_payload)
+                result = self._commit_linear_export(target_directory, files)
+            except Exception as error:
+                result = _SaveTransactionResult(
+                    False, rollback_complete=True, rollback_errors=(str(error),)
+                )
+            if result.committed:
+                self._regression_dirty = False
+                self.install_saved_formulas_requested.emit(export_payload["formulas"])
+                message = "Linear regression results were saved to:\n{}".format(
+                    target_directory
+                )
+                if result.cleanup_warning:
+                    message += "\n\n{}".format(result.cleanup_warning)
+                    message_function = QMessageBox.warning
+                else:
+                    message_function = QMessageBox.information
+                self._show_message_safely(
+                    message_function, self, "Save Linear", message
+                )
+            else:
+                self._regression_dirty = True
+                if result.rollback_complete:
+                    message = "Linear regression results were not saved; all previous files were restored."
+                else:
+                    message = "Linear regression results were not saved; rollback was incomplete."
+                if result.rollback_errors:
+                    message += "\n{}".format("\n".join(result.rollback_errors))
+                if result.cleanup_warning:
+                    message += "\n{}".format(result.cleanup_warning)
+                elif result.recovery_path is not None:
+                    message += "\nRecovery directory: {}".format(result.recovery_path)
+                self._show_message_safely(
+                    QMessageBox.critical, self, "Save Linear error", message
+                )
+        finally:
             self._set_active_worker_task(None)
-            QMessageBox.critical(self, "Save Linear error", str(error))
-            return
-
-        self.install_saved_formulas_requested.emit(export_payload["formulas"])
-        self._regression_dirty = False
-        self._set_active_worker_task(None)
-        QMessageBox.information(
-            self, "Save Linear", "Linear regression results were saved to:\n{}".format(target_directory)
-        )
 
     def _regression_plot_data(self):
         payload = self._regression_result
