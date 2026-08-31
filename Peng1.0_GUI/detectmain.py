@@ -40,6 +40,27 @@ from yolo_detection_worker import YoloDetectionWorker
 
 _USE_CURRENT_RESULT = object()
 GUI_RESOURCE_ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = GUI_RESOURCE_ROOT.parent
+LINEAR_IMPORT_DEFAULT_DIRECTORY = (
+    REPOSITORY_ROOT
+    / "HT-Detector_Peng"
+    / "custom"
+    / "linear_detection"
+    / "linear"
+)
+DETECTION_DEFAULT_DIRECTORY = (
+    REPOSITORY_ROOT
+    / "HT-Detector_Peng"
+    / "custom"
+    / "linear_detection"
+    / "detection"
+)
+
+
+def _dialog_initial_directory(preferred_directory):
+    if preferred_directory.is_dir():
+        return preferred_directory
+    return REPOSITORY_ROOT
 
 
 @dataclass(frozen=True)
@@ -1249,11 +1270,13 @@ class DetectMain(QWidget):
     def _select_calibration_image(self):
         if self._close_wait_pending or self._shutdown_requested:
             return
-        initial_directory = self._last_calibration_directory or ""
+        initial_directory = _dialog_initial_directory(
+            LINEAR_IMPORT_DEFAULT_DIRECTORY
+        )
         image_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select a calibration image",
-            initial_directory,
+            str(initial_directory),
             "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
         )
         if not image_path:
@@ -1357,7 +1380,7 @@ class DetectMain(QWidget):
         image_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select an image for detection",
-            "",
+            str(_dialog_initial_directory(DETECTION_DEFAULT_DIRECTORY)),
             "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
         )
         if not image_path:
