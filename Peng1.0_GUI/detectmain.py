@@ -82,7 +82,7 @@ class DetectMain(QWidget):
     worker_task_finished = Signal()
     shutdown_ready = Signal()
 
-    def __init__(self):
+    def __init__(self, camera_enabled):
         super().__init__()
         self.ui = ui_detectmain.Ui_Form()
         self.ui.setupUi(self)
@@ -104,7 +104,7 @@ class DetectMain(QWidget):
         self._shutdown_ready_emitted = False
 
 #        #put the cameraWidget in cameraMainlVLayout
-        self.mainCamera = Camera()
+        self.mainCamera = Camera(camera_enabled=camera_enabled)
         self.mainCamera.shutdown_ready.connect(self._on_camera_shutdown_ready)
 #        self.ui.cameraMainGroupBox.setWidget(self.mainCamera._ui.cameraWidget)
         self.ui.cameraMainlVLayout.addWidget(self.mainCamera._ui.cameraWidget)

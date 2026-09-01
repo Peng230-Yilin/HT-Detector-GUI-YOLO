@@ -26,7 +26,7 @@ RSRC_PATH = ":/win"
 
 class DetectWindow(QMainWindow):
     about_to_close = Signal(object)
-    def __init__(self, detection):
+    def __init__(self, detection, camera_enabled):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._close_wait_pending = False
@@ -40,7 +40,7 @@ class DetectWindow(QMainWindow):
         self._detection = detection
 
         self._detectFile = DetectFile()
-        self._detectMain = DetectMain()
+        self._detectMain = DetectMain(camera_enabled=camera_enabled)
         self._detectMain.worker_task_finished.connect(
             self._on_worker_task_finished
         )
