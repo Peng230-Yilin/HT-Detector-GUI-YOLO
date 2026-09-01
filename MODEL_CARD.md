@@ -2,7 +2,7 @@
 
 - 模型名称：best.pt
 - 模型类型：YOLOv8n Detection
-- 训练者/权利人：HT-Detector-GUI-YOLO Project Team
+- 训练者/权利人：Peng Yilin、Yue Hengmao
 - 基础模型：Ultralytics YOLOv8n
 - 训练数据：自行采集和标注的比色皿图像
 - 文件大小：6,279,129 bytes
