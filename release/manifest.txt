@@ -1,0 +1,46 @@
+# Root release metadata and installation files
+README.md
+LICENSE
+MODEL_CARD.md
+THIRD_PARTY_NOTICES.md
+LICENSES
+requirements-runtime.txt
+requirements-torch-cpu.txt
+install-v1.0.0.ps1
+release/manifest.txt
+release/empty-directories.txt
+release/build_release.ps1
+
+# GUI runtime source and resources
+Peng1.0_GUI/main.py
+Peng1.0_GUI/product_version.py
+Peng1.0_GUI/detection.py
+Peng1.0_GUI/detectionwindow.py
+Peng1.0_GUI/detectmain.py
+Peng1.0_GUI/detectfile.py
+Peng1.0_GUI/camera.py
+Peng1.0_GUI/yolo_detection_worker.py
+Peng1.0_GUI/interface_config.py
+Peng1.0_GUI/interface_settings_dialog.py
+Peng1.0_GUI/rc_img.py
+Peng1.0_GUI/img.qrc
+Peng1.0_GUI/README.md
+Peng1.0_GUI/LICENSE
+Peng1.0_GUI/ui
+Peng1.0_GUI/resource
+Peng1.0_GUI/interface/linear/image/linear_regression_image.jpg
+Peng1.0_GUI/interface/linear/table/linear_regression_table.xlsx
+Peng1.0_GUI/interface/linear/only_table/linear_regression_table.xlsx
+Peng1.0_GUI/interface/detect/image/detection_image.jpg
+Peng1.0_GUI/interface/detect/table/detection_table.xlsx
+Peng1.0_GUI/interface/detect/only_table/detection_table.xlsx
+Peng1.0_GUI/interface/detect/time.txt
+
+# Vendored runtime and fixed checkpoint
+HT-Detector_Peng/interface.py
+HT-Detector_Peng/pyproject.toml
+HT-Detector_Peng/README.md
+HT-Detector_Peng/LICENSE
+HT-Detector_Peng/CITATION.cff
+HT-Detector_Peng/ultralytics
+HT-Detector_Peng/weights/cuvette_Peng/yolov8n_train/weights/best.pt

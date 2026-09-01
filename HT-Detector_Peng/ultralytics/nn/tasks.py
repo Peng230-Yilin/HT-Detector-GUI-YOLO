@@ -1,6 +1,8 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
 import contextlib
+import hashlib
+import io
 from copy import deepcopy
 from pathlib import Path
 
@@ -705,6 +707,58 @@ def temporary_modules(modules=None):
                 del sys.modules[old]
 
 
+_TRUSTED_YOLOV8_WEIGHT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "weights"
+    / "cuvette_Peng"
+    / "yolov8n_train"
+    / "weights"
+    / "best.pt"
+).resolve()
+_TRUSTED_YOLOV8_WEIGHT_SIZE = 6279129
+_TRUSTED_YOLOV8_WEIGHT_SHA256 = "582A0F22C8FCC4ED5623D7E6E87069C8C6E38A7BC3199FC94590DE90FB333E31"
+
+
+def _trusted_yolov8_weight_path(weight):
+    """Return the canonical trusted YOLOv8 weight path or reject the checkpoint."""
+    checkpoint_path = Path(weight).expanduser().resolve()
+    if checkpoint_path != _TRUSTED_YOLOV8_WEIGHT_PATH:
+        raise PermissionError(f"Checkpoint path is not trusted: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_trusted_yolov8_checkpoint(weight):
+    """Load the fixed project checkpoint only after validating the exact bytes."""
+    checkpoint_path = _trusted_yolov8_weight_path(weight)
+    try:
+        checkpoint_bytes = checkpoint_path.read_bytes()
+    except OSError as error:
+        raise RuntimeError(f"Trusted checkpoint could not be read: {checkpoint_path}") from error
+
+    checkpoint_size = len(checkpoint_bytes)
+    if checkpoint_size != _TRUSTED_YOLOV8_WEIGHT_SIZE:
+        raise ValueError(
+            "Trusted checkpoint size mismatch: expected {} bytes, got {} bytes".format(
+                _TRUSTED_YOLOV8_WEIGHT_SIZE, checkpoint_size
+            )
+        )
+
+    checkpoint_sha256 = hashlib.sha256(checkpoint_bytes).hexdigest().upper()
+    if checkpoint_sha256 != _TRUSTED_YOLOV8_WEIGHT_SHA256:
+        raise ValueError(
+            "Trusted checkpoint SHA-256 mismatch: expected {}, got {}".format(
+                _TRUSTED_YOLOV8_WEIGHT_SHA256, checkpoint_sha256
+            )
+        )
+
+    try:
+        return torch.load(io.BytesIO(checkpoint_bytes), map_location="cpu", weights_only=False)
+    except ModuleNotFoundError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"Trusted checkpoint deserialization failed: {checkpoint_path}") from error
+
+
 def torch_safe_load(weight):
     """
     This function attempts to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised,
@@ -717,10 +771,8 @@ def torch_safe_load(weight):
     Returns:
         (dict): The loaded PyTorch model.
     """
-    from ultralytics.utils.downloads import attempt_download_asset
-
     check_suffix(file=weight, suffix=".pt")
-    file = attempt_download_asset(weight)  # search online if missing locally
+    file = str(_trusted_yolov8_weight_path(weight))
     try:
         with temporary_modules(
             {
@@ -729,7 +781,7 @@ def torch_safe_load(weight):
                 "ultralytics.yolo.data": "ultralytics.data",
             }
         ):  # for legacy 8.0 Classify and Pose models
-            ckpt = torch.load(file, map_location="cpu")
+            ckpt = _load_trusted_yolov8_checkpoint(file)
 
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == "models":
@@ -749,7 +801,7 @@ def torch_safe_load(weight):
             f"run a command with an official YOLOv8 model, i.e. 'yolo predict model=yolov8n.pt'"
         )
         check_requirements(e.name)  # install missing module
-        ckpt = torch.load(file, map_location="cpu")
+        ckpt = _load_trusted_yolov8_checkpoint(file)
 
     if not isinstance(ckpt, dict):
         # File is likely a YOLO instance saved with i.e. torch.save(model, "saved_model.pt")
