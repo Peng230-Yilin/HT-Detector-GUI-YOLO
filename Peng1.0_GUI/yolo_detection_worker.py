@@ -5,6 +5,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from batch_state import (
+    SampleError,
+    SampleErrorType,
+    SampleResult,
+    assign_image_numbers,
+    pair_cuvettes_and_liquids,
+)
 from interface_config import load_effective_settings
 
 
@@ -446,7 +453,9 @@ class YoloDetectionWorker(QObject):
             )
         return start_x, start_top, layout
 
-    def _build_payload(self, result, settings, cv2, config_warnings=None):
+    def _build_payload(
+        self, result, settings, cv2, source_path="", config_warnings=None
+    ):
         import numpy as np
 
         original_bgr = result.orig_img
@@ -455,6 +464,9 @@ class YoloDetectionWorker(QObject):
         annotated = original_bgr.copy()
         warnings = list(config_warnings or [])
         targets = []
+        sample_results = []
+        sample_errors = []
+        source_file = Path(source_path).name if source_path else ""
 
         color_channel = settings["color_channel"]
         if color_channel not in {"R", "G", "B"}:
@@ -468,7 +480,17 @@ class YoloDetectionWorker(QObject):
         boxes = result.boxes
         if boxes is None or len(boxes) == 0:
             warnings.append("Detection completed, but no objects were found.")
-            return {"image": annotated, "targets": targets, "warnings": warnings}
+            sample_errors.append(SampleError(
+                image_order=1,
+                source_file=source_file,
+                error_type=SampleErrorType.IMAGE_FAILED,
+                reason="No cuvette or liquid objects were detected.",
+            ))
+            return {
+                "image": annotated, "targets": targets, "warnings": warnings,
+                "sample_results": sample_results,
+                "sample_errors": [error.as_dict() for error in sample_errors],
+            }
 
         coordinates = boxes.xyxy.detach().cpu().numpy()
         classes = boxes.cls.detach().cpu().numpy().astype(int)
@@ -500,16 +522,33 @@ class YoloDetectionWorker(QObject):
                 cv2, annotated, label, x0, y0, (0, 255, 0)
             )
 
-        pairs, unmatched_cuvettes, unmatched_liquids = _pair_cuvettes_and_liquids(
-            cuvettes, liquids
+        pairing = pair_cuvettes_and_liquids(
+            cuvettes, liquids, image_order=1, source_file=source_file
         )
+        pairs = pairing.pairs
+        sample_errors.extend(pairing.errors)
+        unmatched_cuvettes = sum(
+            error.error_type == SampleErrorType.UNMATCHED_CUVETTE
+            for error in pairing.errors
+        )
+        unmatched_liquids = sum(
+            error.error_type == SampleErrorType.UNMATCHED_LIQUID
+            for error in pairing.errors
+        )
+        ambiguous = len(pairing.errors) - unmatched_cuvettes - unmatched_liquids
         if unmatched_cuvettes:
-            warnings.append("{} cuvette box(es) were not matched.".format(len(unmatched_cuvettes)))
+            warnings.append("{} cuvette box(es) were not matched.".format(unmatched_cuvettes))
         if unmatched_liquids:
-            warnings.append("{} liquid box(es) were not matched.".format(len(unmatched_liquids)))
+            warnings.append("{} liquid box(es) were not matched.".format(unmatched_liquids))
+        if ambiguous:
+            warnings.append("{} ambiguous detection box(es) were skipped.".format(ambiguous))
         if not pairs:
             warnings.append("No valid cuvette-liquid pairs were found.")
-            return {"image": annotated, "targets": targets, "warnings": warnings}
+            return {
+                "image": annotated, "targets": targets, "warnings": warnings,
+                "sample_results": sample_results,
+                "sample_errors": [error.as_dict() for error in sample_errors],
+            }
 
         slope, intercept = self._load_formula(color_channel)
         ratios = (
@@ -519,6 +558,7 @@ class YoloDetectionWorker(QObject):
             settings["y1_ratio"],
         )
         rgb_colors = {"R": (0, 0, 255), "G": (0, 255, 0), "B": (255, 0, 0)}
+        measured = []
         for number, (cuvette_box, liquid_box) in enumerate(pairs, start=1):
             try:
                 roi = _calculate_rgb_roi(liquid_box, original_bgr.shape, ratios)
@@ -532,21 +572,51 @@ class YoloDetectionWorker(QObject):
                 )
             except (TypeError, ValueError) as error:
                 warnings.append("No.{} was skipped: {}".format(number, error))
+                error_type = (
+                    SampleErrorType.INVALID_ROI
+                    if "region" in str(error).lower()
+                    else SampleErrorType.MEASUREMENT_FAILED
+                )
+                sample_errors.append(SampleError(
+                    image_order=1,
+                    source_file=source_file,
+                    error_type=error_type,
+                    reason=str(error),
+                    related_boxes=[cuvette_box, liquid_box],
+                    related_cuvette_boxes=[cuvette_box],
+                    related_liquid_boxes=[liquid_box],
+                    position=_box_center(cuvette_box),
+                ))
                 continue
 
-            target_number = len(targets) + 1
-            targets.append(
-                {
-                    "No.": target_number,
-                    "Con.": concentration,
-                    "Red": red,
-                    "Green": green,
-                    "Blue": blue,
-                    "cuvette_box": cuvette_box,
-                    "liquid_box": liquid_box,
-                    "rgb_roi": roi,
-                }
+            concentrations = {"R": None, "G": None, "B": None}
+            concentrations[color_channel] = concentration
+            sample = SampleResult(
+                image_order=1,
+                source_file=source_file,
+                cuvette_box=cuvette_box,
+                liquid_box=liquid_box,
+                roi_box=roi,
+                red=red,
+                green=green,
+                blue=blue,
+                con_r=concentrations["R"],
+                con_g=concentrations["G"],
+                con_b=concentrations["B"],
             )
+            measured.append((sample, concentration))
+
+        ordered_samples = assign_image_numbers([sample for sample, _ in measured])
+        concentrations_by_identity = {id(sample): value for sample, value in measured}
+        for sample in ordered_samples:
+            sample.batch_no = sample.no_in_image
+            concentration = concentrations_by_identity[id(sample)]
+            sample_results.append(sample)
+            target_number = sample.no_in_image
+            targets.append(sample.legacy_target(concentration))
+            cuvette_box = sample.cuvette_box
+            roi = sample.roi_box
+            red, green, blue = sample.red, sample.green, sample.blue
             x0_roi, y0_roi, x1_roi, y1_roi = roi
             cv2.rectangle(
                 annotated, (x0_roi, y0_roi), (x1_roi, y1_roi), (250, 240, 10), 2
@@ -577,7 +647,13 @@ class YoloDetectionWorker(QObject):
 
         if not targets:
             warnings.append("No valid RGB measurements were produced.")
-        return {"image": annotated, "targets": targets, "warnings": warnings}
+        return {
+            "image": annotated,
+            "targets": targets,
+            "warnings": warnings,
+            "sample_results": [sample.as_dict() for sample in sample_results],
+            "sample_errors": [error.as_dict() for error in sample_errors],
+        }
 
     @staticmethod
     def _regression_formula(concentrations, values, channel):
@@ -777,7 +853,8 @@ class YoloDetectionWorker(QObject):
                 raise RuntimeError("YOLO returned no result for the selected image.")
 
             payload = self._build_payload(
-                results[0], settings, cv2, config_warnings=config_warnings
+                results[0], settings, cv2, source_path=str(image_path),
+                config_warnings=config_warnings
             )
             payload["source_path"] = str(image_path)
             self.finished.emit(payload)
