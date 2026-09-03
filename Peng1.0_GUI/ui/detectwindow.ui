@@ -113,6 +113,27 @@
      <string>Tools</string>
     </property>
    </widget>
+   <widget class="QMenu" name="menuDetection">
+    <property name="title">
+     <string>Detection</string>
+    </property>
+    <widget class="QMenu" name="menuDetection_Scope">
+     <property name="title">
+      <string>Detection Scope</string>
+     </property>
+     <addaction name="actionDetection_Current_Image"/>
+     <addaction name="actionDetection_Entire_Batch"/>
+    </widget>
+    <widget class="QMenu" name="menuDetection_Numbering">
+     <property name="title">
+      <string>Numbering</string>
+     </property>
+     <addaction name="actionDetection_Per_Image"/>
+     <addaction name="actionDetection_Continuous"/>
+    </widget>
+    <addaction name="menuDetection_Scope"/>
+    <addaction name="menuDetection_Numbering"/>
+   </widget>
    <widget class="QMenu" name="menuWindow">
     <property name="title">
      <string>Window</string>
@@ -127,6 +148,7 @@
    <addaction name="menuFile"/>
    <addaction name="menuEdit"/>
    <addaction name="menuView"/>
+   <addaction name="menuDetection"/>
    <addaction name="menuTools"/>
    <addaction name="menuWindow"/>
    <addaction name="menuHelp"/>
@@ -379,6 +401,24 @@
    <property name="text">
     <string>Preferences</string>
    </property>
+  </action>
+  <action name="actionDetection_Current_Image">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="checked"><bool>true</bool></property>
+   <property name="text"><string>Current Image</string></property>
+  </action>
+  <action name="actionDetection_Entire_Batch">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="text"><string>Entire Batch</string></property>
+  </action>
+  <action name="actionDetection_Per_Image">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="checked"><bool>true</bool></property>
+   <property name="text"><string>Reset for Each Image</string></property>
+  </action>
+  <action name="actionDetection_Continuous">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="text"><string>Continue Across Batch</string></property>
   </action>
   <action name="actionAbout_Qt_Creator">
    <property name="text">

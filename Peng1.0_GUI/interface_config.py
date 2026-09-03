@@ -37,6 +37,11 @@ TEXT_ORDERS = (
 )
 
 _DEFAULT_SETTINGS = None
+DETECTION_PREFERENCES_FILE_NAME = "detection_preferences.json"
+DETECTION_PREFERENCES_DEFAULTS = {
+    "detection_scope": "current_image",
+    "numbering_mode": "per_image",
+}
 
 
 def load_interface_module():
@@ -278,3 +283,49 @@ def save_settings(settings, config_file=None):
     if not save_file.commit():
         raise RuntimeError("Could not atomically save the configuration file: {}".format(path))
     return path, document
+
+
+def detection_preferences_path():
+    return configuration_path().with_name(DETECTION_PREFERENCES_FILE_NAME)
+
+
+def validate_detection_preferences(preferences):
+    if not isinstance(preferences, dict) or set(preferences) != set(DETECTION_PREFERENCES_DEFAULTS):
+        raise ValueError("Detection preferences must contain exactly scope and numbering mode.")
+    if preferences["detection_scope"] not in ("current_image", "entire_batch"):
+        raise ValueError("detection_scope is invalid.")
+    if preferences["numbering_mode"] not in ("per_image", "continuous"):
+        raise ValueError("numbering_mode is invalid.")
+    return copy.deepcopy(preferences)
+
+
+def load_detection_preferences(config_file=None):
+    path = Path(config_file) if config_file is not None else detection_preferences_path()
+    defaults = copy.deepcopy(DETECTION_PREFERENCES_DEFAULTS)
+    if not path.is_file():
+        return defaults, []
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            preferences = validate_detection_preferences(json.load(stream))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        return defaults, ["Invalid detection preferences; using defaults: {}".format(error)]
+    return preferences, []
+
+
+def save_detection_preferences(preferences, config_file=None):
+    validated = validate_detection_preferences(preferences)
+    path = Path(config_file) if config_file is not None else detection_preferences_path()
+    encoded = (json.dumps(validated, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError("Could not create detection preferences directory: {}".format(error)) from error
+    save_file = QSaveFile(str(path))
+    if not save_file.open(QIODevice.OpenModeFlag.WriteOnly):
+        raise RuntimeError("Could not open detection preferences: {}".format(path))
+    if save_file.write(encoded) != len(encoded):
+        save_file.cancelWriting()
+        raise RuntimeError("Could not write complete detection preferences.")
+    if not save_file.commit():
+        raise RuntimeError("Could not atomically save detection preferences: {}".format(path))
+    return path, validated

@@ -36,6 +36,8 @@ from ui import ui_detectmain
 from camera import Camera
 from interface_config import load_effective_settings
 from yolo_detection_worker import YoloDetectionWorker
+from batch_detection_controller import BatchDetectionController
+from batch_state import DetectionScope, ImageStatus, NumberingMode
 
 
 _USE_CURRENT_RESULT = object()
@@ -74,13 +76,15 @@ class _SaveTransactionResult:
 
 
 class DetectMain(QWidget):
-    detection_requested = Signal(str, str)
+    detection_requested = Signal(str, str, object)
     regression_requested = Signal(str, str)
     clear_active_formulas_requested = Signal()
     install_saved_formulas_requested = Signal(object)
     restore_active_formulas_requested = Signal(object)
     worker_task_finished = Signal()
     shutdown_ready = Signal()
+    busy_changed = Signal(bool)
+    detection_status_changed = Signal(str)
 
     def __init__(self, camera_enabled):
         super().__init__()
@@ -102,6 +106,8 @@ class DetectMain(QWidget):
         self._thread_shutdown_complete = False
         self._camera_shutdown_complete = False
         self._shutdown_ready_emitted = False
+        self._batch_controller = BatchDetectionController()
+        self._detection_weight_path = None
 
 #        #put the cameraWidget in cameraMainlVLayout
         self.mainCamera = Camera(camera_enabled=camera_enabled)
@@ -414,6 +420,21 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(False)
         self._update_save_button()
 
+    def _clear_detection_results_for_new_run(self):
+        self._detection_result = None
+        self._detection_dirty = False
+        if self._last_completed_result_type == "detection":
+            self._last_completed_result_type = None
+        self._recgPixmap = None
+        self.ui.labelRecgImg.clear()
+        self._populate_tableview(
+            self.ui.tabviewRecg, ["No.", "Con.", "Red", "Green", "Blue"], []
+        )
+        self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self._update_save_button()
+
     @staticmethod
     def _validated_source_path(source_path, description):
         if not isinstance(source_path, str) or not source_path.strip():
@@ -578,38 +599,24 @@ class DetectMain(QWidget):
         sanitized = sanitized[:cls.MAX_DETECTION_STEM_LENGTH].rstrip(" .")
         return sanitized or "detection_result"
 
-    def _validated_detection_export_payload(self, payload=_USE_CURRENT_RESULT):
-        if payload is _USE_CURRENT_RESULT:
-            payload = self._detection_result
-        if not isinstance(payload, dict):
-            raise ValueError("No detection result is available.")
-        source_path = self._validated_source_path(
-            payload.get("source_path"), "detection"
-        )
-        image = payload.get("image")
-        if not isinstance(image, np.ndarray) or image.ndim != 3 or image.size == 0:
-            raise ValueError("The detection annotated image is invalid.")
-        if image.shape[2] not in (3, 4):
-            raise ValueError("The detection annotated image has an unsupported channel count.")
-        if image.shape[2] != 3:
-            raise ValueError("The detection annotated image must be a three-channel BGR image.")
-        targets = payload.get("targets")
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("At least one valid detection target is required.")
+    @staticmethod
+    def _normalized_detection_targets(targets):
+        if not isinstance(targets, list):
+            raise ValueError("Detection targets must be a list.")
 
-        validated_targets = []
+        normalized_targets = []
         numeric_fields = ("No.", "Con.", "Red", "Green", "Blue")
         for index, target in enumerate(targets, start=1):
             if not isinstance(target, dict):
                 raise ValueError("Detection target {} is invalid.".format(index))
-            validated = {}
+            normalized = dict(target)
             for field in numeric_fields:
                 value = target.get(field)
                 if isinstance(value, bool) or not isinstance(value, numbers.Real):
                     raise ValueError("Detection target {} field {} must be numeric.".format(index, field))
                 if not math.isfinite(float(value)):
                     raise ValueError("Detection target {} field {} must be finite.".format(index, field))
-                validated[field] = value
+                normalized[field] = value
             roi = target.get("rgb_roi")
             if not isinstance(roi, (tuple, list)) or len(roi) != 4:
                 raise ValueError("Detection target {} rgb_roi is invalid.".format(index))
@@ -623,13 +630,74 @@ class DetectMain(QWidget):
             x0, y0, x1, y1 = coordinates
             if x1 <= x0 or y1 <= y0:
                 raise ValueError("Detection target {} rgb_roi must have positive dimensions.".format(index))
-            validated["rgb_roi"] = tuple(coordinates)
-            validated_targets.append(validated)
+            normalized["rgb_roi"] = tuple(coordinates)
+            normalized_targets.append(normalized)
+        return normalized_targets
+
+    def _normalized_detection_runtime_payload(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("No detection result is available.")
+        source_path = self._validated_source_path(
+            payload.get("source_path"), "detection"
+        )
+        image = payload.get("image")
+        if not isinstance(image, np.ndarray) or image.ndim != 3 or image.size == 0:
+            raise ValueError("The detection annotated image is invalid.")
+        if image.shape[2] not in (3, 4):
+            raise ValueError("The detection annotated image has an unsupported channel count.")
+        if image.shape[2] != 3:
+            raise ValueError("The detection annotated image must be a three-channel BGR image.")
+        targets = self._normalized_detection_targets(payload.get("targets"))
+        sample_results = payload.get("sample_results", [])
+        sample_errors = payload.get("sample_errors", [])
+        warnings = payload.get("warnings", [])
+        for name, values in (
+            ("sample_results", sample_results),
+            ("sample_errors", sample_errors),
+            ("warnings", warnings),
+        ):
+            if not isinstance(values, list):
+                raise ValueError("Detection {} must be a list.".format(name))
+        if not all(isinstance(value, dict) for value in sample_results):
+            raise ValueError("Detection sample_results entries must be objects.")
+        if not all(isinstance(value, dict) for value in sample_errors):
+            raise ValueError("Detection sample_errors entries must be objects.")
+
+        normalized = dict(payload)
+        normalized.update({
+            "source_path": source_path,
+            "image": image,
+            "targets": targets,
+            "sample_results": [dict(value) for value in sample_results],
+            "sample_errors": [dict(value) for value in sample_errors],
+            "warnings": list(warnings),
+        })
+        return normalized
+
+    def _validated_detection_export_payload(self, payload=_USE_CURRENT_RESULT):
+        if payload is _USE_CURRENT_RESULT:
+            payload = self._detection_result
+        normalized = self._normalized_detection_runtime_payload(payload)
+        if not normalized["targets"]:
+            raise ValueError("At least one valid detection target is required.")
+
+        validated_targets = [
+            {
+                "No.": target["No."],
+                "Con.": target["Con."],
+                "Red": target["Red"],
+                "Green": target["Green"],
+                "Blue": target["Blue"],
+                "rgb_roi": target["rgb_roi"],
+            }
+            for target in normalized["targets"]
+        ]
+        source_path = normalized["source_path"]
         return {
             "source_path": source_path,
             "source_stem": Path(source_path).stem,
             "safe_stem": self._safe_detection_stem(source_path),
-            "image": image,
+            "image": normalized["image"],
             "targets": validated_targets,
         }
 
@@ -1244,6 +1312,14 @@ class DetectMain(QWidget):
         self._update_save_button()
         if previous_task is not None and task is None:
             self.worker_task_finished.emit()
+        self.busy_changed.emit(busy)
+
+    def set_detection_options(self, scope, numbering_mode):
+        self._batch_controller.set_options(scope, numbering_mode)
+
+    @property
+    def batch_state(self):
+        return self._batch_controller.state
 
     def is_worker_task_active(self):
         return self._active_worker_task in ("detection", "regression")
@@ -1377,13 +1453,13 @@ class DetectMain(QWidget):
             )
             if answer != QMessageBox.Yes:
                 return
-        image_path, _ = QFileDialog.getOpenFileName(
+        image_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select an image for detection",
+            "Select images for detection",
             str(_dialog_initial_directory(DETECTION_DEFAULT_DIRECTORY)),
             "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
         )
-        if not image_path:
+        if not image_paths:
             return
 
         repository_root = Path(__file__).resolve().parent.parent
@@ -1407,33 +1483,103 @@ class DetectMain(QWidget):
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(0)
         self.ui.progressBar.setRange(0, 0)
+        self._batch_controller.replace_images(image_paths)
+        self._detection_weight_path = str(weight_path)
+        task = self._batch_controller.begin()
+        if task is None:
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(0)
+            return
+        self._clear_detection_results_for_new_run()
         self._set_active_worker_task("detection")
-        self.detection_requested.emit(image_path, str(weight_path))
+        self._dispatch_detection_task(task)
+
+    def _dispatch_detection_task(self, task):
+        if task is None:
+            self._finish_detection_run()
+            return
+        self.detection_status_changed.emit(
+            "Detecting {}/{}: {}".format(
+                task.image_order, len(self.batch_state.images), task.source_file
+            )
+        )
+        self.detection_requested.emit(
+            task.path, self._detection_weight_path, task.context()
+        )
+
+    def _advance_detection_run(self):
+        task = self._batch_controller.next_task()
+        if task is not None:
+            self._dispatch_detection_task(task)
+            return
+        self._finish_detection_run()
+
+    def _finish_detection_run(self):
+        summary = self._batch_controller.finish_if_done()
+        if summary is not None:
+            message = (
+                "Detection completed.\nTotal images: {total_images}\n"
+                "Successful images: {successful_images}\nFailed images: {failed_images}\n"
+                "Valid samples: {valid_samples}\nSample errors: {sample_errors}"
+            ).format(**summary)
+            if self.batch_state.detection_scope == DetectionScope.ALL_IMPORTED_IMAGES:
+                self.detection_status_changed.emit(message.replace("\n", " | "))
+                self._show_message_safely(QMessageBox.information, self, "Detection", message)
+            else:
+                self.detection_status_changed.emit("Detection completed.")
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(100 if summary and summary["successful_images"] else 0)
+        self._set_active_worker_task(None)
+
+    @staticmethod
+    def _detection_failure_message(payload):
+        errors = payload.get("sample_errors", [])
+        image_reasons = [
+            str(error.get("reason"))
+            for error in errors
+            if error.get("error_type") == "image_failed" and error.get("reason")
+        ]
+        reasons = image_reasons or [
+            str(error.get("reason")) for error in errors if error.get("reason")
+        ]
+        if reasons:
+            return "\n".join(dict.fromkeys(reasons))
+        warnings = [str(message) for message in payload.get("warnings", []) if message]
+        if warnings:
+            return "\n".join(dict.fromkeys(warnings))
+        return "Detection produced no valid samples."
 
     @Slot(object)
     def _on_detection_finished(self, payload):
+        if (
+            not isinstance(payload, dict)
+            or not self._batch_controller.matches_active_result(payload)
+        ):
+            return
         if self._close_wait_pending or self._shutdown_requested:
             self._set_active_worker_task(None)
             return
+        accepted = False
         try:
-            export_payload = self._validated_detection_export_payload(payload)
-            image = export_payload["image"]
-            pixmap = self._bgr_image_to_pixmap(image)
-            if pixmap.isNull():
-                raise ValueError("The detection annotated image could not be displayed.")
-            headers = ["No.", "Con.", "Red", "Green", "Blue"]
-            rows = [
-                tuple(target[header] for header in headers)
-                for target in export_payload["targets"]
-            ]
-            model = self._build_table_model(headers, rows)
+            runtime_payload = self._normalized_detection_runtime_payload(payload)
+            has_valid_samples = bool(runtime_payload["sample_results"])
+            if has_valid_samples:
+                image = runtime_payload["image"]
+                pixmap = self._bgr_image_to_pixmap(image)
+                if pixmap.isNull():
+                    raise ValueError("The detection annotated image could not be displayed.")
+                headers = ["No.", "Con.", "Red", "Green", "Blue"]
+                rows = [
+                    tuple(target[header] for header in headers)
+                    for target in runtime_payload["targets"]
+                ]
+                model = self._build_table_model(headers, rows)
 
-            previous_result = self._detection_result
-            previous_dirty = self._detection_dirty
-            previous_type = self._last_completed_result_type
-            previous_pixmap = self._recgPixmap
-            previous_model = self.ui.tabviewRecg.model()
-            try:
+            if not self._batch_controller.accept_payload(runtime_payload):
+                return
+            accepted = True
+            current_image = self.batch_state.current_image
+            if current_image.status == ImageStatus.COMPLETED:
                 self._recgPixmap = pixmap
                 self._scale_label(self.ui.labelRecgImg)
                 self.ui.tabviewRecg.setModel(model)
@@ -1441,51 +1587,81 @@ class DetectMain(QWidget):
                 self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
                     QHeaderView.Stretch
                 )
-                self._detection_result = payload
+                self._detection_result = runtime_payload
                 self._detection_dirty = True
                 self._last_completed_result_type = "detection"
-            except Exception:
-                self._detection_result = previous_result
-                self._detection_dirty = previous_dirty
-                self._last_completed_result_type = previous_type
-                self._recgPixmap = previous_pixmap
-                self.ui.tabviewRecg.setModel(previous_model)
-                self._scale_label(self.ui.labelRecgImg)
-                raise
-            self.ui.progressBar.setRange(0, 100)
-            self.ui.progressBar.setValue(100)
-            warnings = [str(message) for message in payload.get("warnings", []) if message]
-            if warnings:
-                self._show_message_safely(
-                    QMessageBox.warning, self, "Detection warning", "\n".join(warnings)
-                )
+                self.ui.progressBar.setRange(0, 100)
+                self.ui.progressBar.setValue(100)
+                warnings = [
+                    str(message) for message in runtime_payload.get("warnings", [])
+                    if message
+                ]
+                if warnings and self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
+                    self._show_message_safely(
+                        QMessageBox.warning,
+                        self,
+                        "Detection warning",
+                        "\n".join(warnings),
+                    )
+            else:
+                self.ui.progressBar.setRange(0, 100)
+                self.ui.progressBar.setValue(0)
+                if self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
+                    self._show_message_safely(
+                        QMessageBox.warning,
+                        self,
+                        "Detection warning",
+                        self._detection_failure_message(runtime_payload),
+                    )
         except Exception as error:
+            if not accepted:
+                accepted = self._batch_controller.accept_failure(
+                    payload.get("run_token"), payload.get("job_token"), error
+                )
+            if not accepted:
+                return
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
-            self._show_message_safely(
-                QMessageBox.warning,
-                self,
-                "Detection warning",
-                "The new detection result was not accepted; the previous result was preserved.\n{}".format(
-                    error
-                ),
-            )
+            if self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
+                self._show_message_safely(
+                    QMessageBox.warning,
+                    self,
+                    "Detection warning",
+                    str(error),
+                )
         finally:
-            self._set_active_worker_task(None)
+            if accepted:
+                self._advance_detection_run()
 
-    @Slot(str)
-    def _on_detection_failed(self, message):
+    @Slot(object)
+    def _on_detection_failed(self, failure):
+        if isinstance(failure, dict):
+            message = str(failure.get("message", "Detection failed."))
+            run_token = failure.get("run_token")
+            job_token = failure.get("job_token")
+        else:
+            message = str(failure)
+            run_token = None
+            job_token = None
+        if not self._batch_controller.matches_active_result({
+            "run_token": run_token,
+            "job_token": job_token,
+        }):
+            return
         if self._close_wait_pending or self._shutdown_requested:
             self._set_active_worker_task(None)
+            return
+        if not self._batch_controller.accept_failure(run_token, job_token, message):
             return
         try:
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
-            self._show_message_safely(
-                QMessageBox.critical, self, "Detection error", message
-            )
+            if self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
+                self._show_message_safely(
+                    QMessageBox.critical, self, "Detection error", message
+                )
         finally:
-            self._set_active_worker_task(None)
+            self._advance_detection_run()
 
     @Slot(object)
     def _on_regression_finished(self, payload):

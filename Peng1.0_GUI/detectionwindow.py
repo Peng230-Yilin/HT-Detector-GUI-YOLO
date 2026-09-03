@@ -6,8 +6,10 @@ from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QLineEdit, QMenu, QMessageBox,QProgressBar, QToolBar,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QWidget,
                                 QTreeView, QFileSystemModel)
-from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence
-from PySide6.QtCore import QUrl, Qt, Slot, Signal, QDir, QSize, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence
+from PySide6.QtCore import (
+    QUrl, Qt, Slot, Signal, QDir, QSize, QTimer, QSignalBlocker
+)
 
 from PySide6.QtPrintSupport import (QAbstractPrintDialog, QPrinter,
                                     QPrintDialog, QPrintPreviewDialog)
@@ -17,6 +19,7 @@ from ui import ui_detectwindow
 from ui import ui_detectfile
 from detectfile import DetectFile
 from detectmain import DetectMain
+from interface_config import load_detection_preferences, save_detection_preferences
 from interface_settings_dialog import InterfaceSettingsDialog
 
 
@@ -45,6 +48,10 @@ class DetectWindow(QMainWindow):
             self._on_worker_task_finished
         )
         self._detectMain.shutdown_ready.connect(self._on_shutdown_ready)
+        self._detectMain.busy_changed.connect(self._set_detection_menu_enabled)
+        self._detectMain.detection_status_changed.connect(
+            self._uiWindow.statusbar.showMessage
+        )
 
         #set up the dockWidget in mainwindow -> filemanager
         self._uiWindow.dockWidget.setWidget(self._detectFile.ui.filemanagerTabWidget)
@@ -82,6 +89,80 @@ class DetectWindow(QMainWindow):
         self._uiWindow.actionPreferences.triggered.connect(
             self._open_interface_settings
         )
+        self._setup_detection_menu()
+
+    def _setup_detection_menu(self):
+        self._detection_scope_group = QActionGroup(self)
+        self._detection_scope_group.setExclusive(True)
+        self._detection_scope_group.addAction(self._uiWindow.actionDetection_Current_Image)
+        self._detection_scope_group.addAction(self._uiWindow.actionDetection_Entire_Batch)
+        self._numbering_group = QActionGroup(self)
+        self._numbering_group.setExclusive(True)
+        self._numbering_group.addAction(self._uiWindow.actionDetection_Per_Image)
+        self._numbering_group.addAction(self._uiWindow.actionDetection_Continuous)
+        settings, warnings = load_detection_preferences()
+        self._set_detection_menu_checked_state(settings)
+        self._detectMain.set_detection_options(
+            settings["detection_scope"], settings["numbering_mode"]
+        )
+        self._detection_menu_settings = dict(settings)
+        self._detection_scope_group.triggered.connect(self._save_detection_menu_settings)
+        self._numbering_group.triggered.connect(self._save_detection_menu_settings)
+        if warnings:
+            self.statusBar().showMessage(warnings[0])
+
+    def _set_detection_menu_checked_state(self, settings):
+        actions = (
+            self._uiWindow.actionDetection_Current_Image,
+            self._uiWindow.actionDetection_Entire_Batch,
+            self._uiWindow.actionDetection_Per_Image,
+            self._uiWindow.actionDetection_Continuous,
+        )
+        blockers = [QSignalBlocker(action) for action in actions]
+        try:
+            self._uiWindow.actionDetection_Current_Image.setChecked(
+                settings["detection_scope"] == "current_image"
+            )
+            self._uiWindow.actionDetection_Entire_Batch.setChecked(
+                settings["detection_scope"] == "entire_batch"
+            )
+            self._uiWindow.actionDetection_Per_Image.setChecked(
+                settings["numbering_mode"] == "per_image"
+            )
+            self._uiWindow.actionDetection_Continuous.setChecked(
+                settings["numbering_mode"] == "continuous"
+            )
+        finally:
+            blockers.clear()
+
+    def _save_detection_menu_settings(self, _action=None):
+        previous_settings = dict(self._detection_menu_settings)
+        if self._detectMain.is_worker_task_active():
+            self._set_detection_menu_checked_state(previous_settings)
+            return
+        settings = {"detection_scope": (
+            "entire_batch" if self._uiWindow.actionDetection_Entire_Batch.isChecked()
+            else "current_image"
+        ), "numbering_mode": (
+            "continuous" if self._uiWindow.actionDetection_Continuous.isChecked()
+            else "per_image"
+        )}
+        if settings == previous_settings:
+            return
+        try:
+            save_detection_preferences(settings)
+        except Exception as error:
+            self._set_detection_menu_checked_state(previous_settings)
+            QMessageBox.warning(self, "Detection settings", str(error))
+            return
+        self._detectMain.set_detection_options(
+            settings["detection_scope"], settings["numbering_mode"]
+        )
+        self._detection_menu_settings = dict(settings)
+
+    def _set_detection_menu_enabled(self, busy):
+        self._uiWindow.menuDetection_Scope.setEnabled(not busy)
+        self._uiWindow.menuDetection_Numbering.setEnabled(not busy)
 
     def closeEvent(self, event):
         if self._final_close_allowed:

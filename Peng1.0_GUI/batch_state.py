@@ -15,12 +15,12 @@ _NATURAL_PART = re.compile(r"(\d+)")
 
 class DetectionScope(str, Enum):
     CURRENT_IMAGE = "current_image"
-    ALL_IMPORTED_IMAGES = "all_imported_images"
+    ALL_IMPORTED_IMAGES = "entire_batch"
 
 
 class NumberingMode(str, Enum):
     PER_IMAGE = "per_image"
-    CONTINUOUS_BATCH = "continuous_batch"
+    CONTINUOUS_BATCH = "continuous"
 
 
 class ImageStatus(str, Enum):
@@ -65,9 +65,9 @@ class SampleResult:
     def as_dict(self):
         return asdict(self)
 
-    def legacy_target(self, concentration):
+    def legacy_target(self, concentration, display_number=None):
         return {
-            "No.": self.no_in_image,
+            "No.": self.no_in_image if display_number is None else display_number,
             "Con.": concentration,
             "Red": self.red,
             "Green": self.green,

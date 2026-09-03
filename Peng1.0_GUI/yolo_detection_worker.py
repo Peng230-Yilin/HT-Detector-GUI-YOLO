@@ -153,7 +153,7 @@ def _text_layout(cv2, image_height, texts):
 
 class YoloDetectionWorker(QObject):
     finished = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
     regression_finished = Signal(object)
     regression_failed = Signal(str)
 
@@ -454,7 +454,8 @@ class YoloDetectionWorker(QObject):
         return start_x, start_top, layout
 
     def _build_payload(
-        self, result, settings, cv2, source_path="", config_warnings=None
+        self, result, settings, cv2, source_path="", config_warnings=None,
+        image_order=1, batch_start_no=1, display_start_no=1,
     ):
         import numpy as np
 
@@ -481,7 +482,7 @@ class YoloDetectionWorker(QObject):
         if boxes is None or len(boxes) == 0:
             warnings.append("Detection completed, but no objects were found.")
             sample_errors.append(SampleError(
-                image_order=1,
+                image_order=image_order,
                 source_file=source_file,
                 error_type=SampleErrorType.IMAGE_FAILED,
                 reason="No cuvette or liquid objects were detected.",
@@ -523,7 +524,7 @@ class YoloDetectionWorker(QObject):
             )
 
         pairing = pair_cuvettes_and_liquids(
-            cuvettes, liquids, image_order=1, source_file=source_file
+            cuvettes, liquids, image_order=image_order, source_file=source_file
         )
         pairs = pairing.pairs
         sample_errors.extend(pairing.errors)
@@ -578,7 +579,7 @@ class YoloDetectionWorker(QObject):
                     else SampleErrorType.MEASUREMENT_FAILED
                 )
                 sample_errors.append(SampleError(
-                    image_order=1,
+                    image_order=image_order,
                     source_file=source_file,
                     error_type=error_type,
                     reason=str(error),
@@ -592,7 +593,7 @@ class YoloDetectionWorker(QObject):
             concentrations = {"R": None, "G": None, "B": None}
             concentrations[color_channel] = concentration
             sample = SampleResult(
-                image_order=1,
+                image_order=image_order,
                 source_file=source_file,
                 cuvette_box=cuvette_box,
                 liquid_box=liquid_box,
@@ -609,11 +610,11 @@ class YoloDetectionWorker(QObject):
         ordered_samples = assign_image_numbers([sample for sample, _ in measured])
         concentrations_by_identity = {id(sample): value for sample, value in measured}
         for sample in ordered_samples:
-            sample.batch_no = sample.no_in_image
+            sample.batch_no = batch_start_no + sample.no_in_image - 1
             concentration = concentrations_by_identity[id(sample)]
             sample_results.append(sample)
-            target_number = sample.no_in_image
-            targets.append(sample.legacy_target(concentration))
+            display_number = display_start_no + sample.no_in_image - 1
+            targets.append(sample.legacy_target(concentration, display_number))
             cuvette_box = sample.cuvette_box
             roi = sample.roi_box
             red, green, blue = sample.red, sample.green, sample.blue
@@ -628,7 +629,7 @@ class YoloDetectionWorker(QObject):
                 "B": round(blue, settings["rgb_display_accuracy"]),
             }
             con_text = round(concentration, settings["con_display_accuracy"])
-            text_lines = [("No.{}".format(target_number), (255, 0, 255)),
+            text_lines = [("No.{}".format(display_number), (255, 0, 255)),
                           ("Con.:{}".format(con_text), (255, 255, 0))]
             text_lines.extend(
                 ("{}:{}".format(channel, text_values[channel]), rgb_colors[channel])
@@ -829,8 +830,8 @@ class YoloDetectionWorker(QObject):
             "warnings": warnings,
         }
 
-    @Slot(str, str)
-    def detect(self, image_path, weight_path):
+    @Slot(str, str, object)
+    def detect(self, image_path, weight_path, context=None):
         try:
             import cv2
             import numpy as np
@@ -852,14 +853,25 @@ class YoloDetectionWorker(QObject):
             if not results:
                 raise RuntimeError("YOLO returned no result for the selected image.")
 
+            context = dict(context or {})
             payload = self._build_payload(
                 results[0], settings, cv2, source_path=str(image_path),
-                config_warnings=config_warnings
+                config_warnings=config_warnings,
+                image_order=int(context.get("image_order", 1)),
+                batch_start_no=int(context.get("batch_start_no", 1)),
+                display_start_no=int(context.get("display_start_no", 1)),
             )
             payload["source_path"] = str(image_path)
+            payload["run_token"] = context.get("run_token")
+            payload["job_token"] = context.get("job_token")
             self.finished.emit(payload)
         except Exception as error:
-            self.failed.emit("{}: {}".format(type(error).__name__, error))
+            context = dict(context or {})
+            self.failed.emit({
+                "message": "{}: {}".format(type(error).__name__, error),
+                "run_token": context.get("run_token"),
+                "job_token": context.get("job_token"),
+            })
 
     @Slot(str, str)
     def regress(self, image_path, weight_path):
