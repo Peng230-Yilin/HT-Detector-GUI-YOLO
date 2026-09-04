@@ -1,6 +1,7 @@
 import math
 import numbers
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -13,6 +14,25 @@ from batch_state import (
     pair_cuvettes_and_liquids,
 )
 from interface_config import load_effective_settings
+from linear_series_controller import LINEAR_SERIES_OPERATION
+
+
+_LINEAR_SERIES_IDENTITY_FIELDS = (
+    "operation",
+    "run_token",
+    "job_token",
+    "image_order",
+    "normalized_path",
+    "original_file_name",
+)
+_LINEAR_SERIES_SETTING_FIELDS = (
+    "detect_confidence",
+    "x0_ratio",
+    "y0_ratio",
+    "x1_ratio",
+    "y1_ratio",
+    "rgb_calculate_accuracy",
+)
 
 
 def _box_center(box):
@@ -156,6 +176,8 @@ class YoloDetectionWorker(QObject):
     failed = Signal(object)
     regression_finished = Signal(object)
     regression_failed = Signal(str)
+    linear_series_extraction_finished = Signal(object)
+    linear_series_extraction_failed = Signal(object)
 
     FORMULA_CHANNELS = ("R", "G", "B")
     FORMULA_FIELDS = ("slope", "intercept", "r", "R2", "p", "std_err")
@@ -307,6 +329,406 @@ class YoloDetectionWorker(QObject):
             self._model = YOLO(weight_path)
             self._weight_path = weight_path
         return self._model
+
+    @staticmethod
+    def _validated_linear_series_context(image_path, context):
+        if not isinstance(context, Mapping):
+            raise ValueError("Linear series context must be a mapping.")
+        try:
+            actual_fields = set(context)
+        except Exception as error:
+            raise ValueError("Linear series context fields could not be read.") from error
+        expected_fields = set(_LINEAR_SERIES_IDENTITY_FIELDS)
+        if actual_fields != expected_fields:
+            missing = sorted(expected_fields - actual_fields)
+            extra = sorted(actual_fields - expected_fields, key=str)
+            details = []
+            if missing:
+                details.append("missing: {}".format(", ".join(missing)))
+            if extra:
+                details.append("unexpected: {}".format(", ".join(map(str, extra))))
+            raise ValueError(
+                "Linear series context fields are invalid ({})".format(
+                    "; ".join(details)
+                )
+            )
+
+        identity = {name: context[name] for name in _LINEAR_SERIES_IDENTITY_FIELDS}
+        if (
+            type(identity["operation"]) is not str
+            or identity["operation"] != LINEAR_SERIES_OPERATION
+        ):
+            raise ValueError("Invalid Linear series operation.")
+        for name in ("run_token", "job_token", "image_order"):
+            value = identity[name]
+            if type(value) is not int or value <= 0:
+                raise ValueError(
+                    "{} must be a positive exact integer.".format(name)
+                )
+        for name in ("normalized_path", "original_file_name"):
+            value = identity[name]
+            if type(value) is not str or not value:
+                raise ValueError("{} must be a non-empty string.".format(name))
+        if type(image_path) is not str or not image_path:
+            raise ValueError("Linear series image_path must be a non-empty string.")
+        if image_path != identity["normalized_path"]:
+            raise ValueError(
+                "Linear series image_path must exactly match normalized_path."
+            )
+        return identity
+
+    @staticmethod
+    def _linear_series_context_diagnostic(context, error):
+        payload = {}
+        for name in _LINEAR_SERIES_IDENTITY_FIELDS:
+            value = None
+            if isinstance(context, Mapping):
+                try:
+                    if name in context:
+                        value = context[name]
+                except Exception:
+                    value = None
+            payload[name] = value
+        payload.update({
+            "error_type": "invalid_context",
+            "reason": "{}: {}".format(type(error).__name__, error),
+            "errors": [],
+            "context_valid": False,
+        })
+        return payload
+
+    @staticmethod
+    def _linear_series_settings(settings):
+        if not isinstance(settings, Mapping):
+            raise ValueError("Linear series settings must be a mapping.")
+        selected = {name: settings[name] for name in _LINEAR_SERIES_SETTING_FIELDS}
+        selected["show_confidence"] = settings.get("show_confidence", False)
+        return selected
+
+    @staticmethod
+    def _typed_detection_records(result):
+        import numpy as np
+
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
+            return [], [], []
+        coordinates = boxes.xyxy.detach().cpu().numpy()
+        classes = boxes.cls.detach().cpu().numpy()
+        confidences = boxes.conf.detach().cpu().numpy()
+        if not (
+            len(coordinates) == len(classes) == len(confidences) == len(boxes)
+        ):
+            raise ValueError("YOLO detection arrays have inconsistent lengths.")
+
+        cuvette_id, liquid_id = YoloDetectionWorker._class_ids(result.names)
+        records = []
+        for coordinates_xyxy, class_value, confidence_value in zip(
+            coordinates, classes, confidences
+        ):
+            if isinstance(class_value, (bool, np.bool_)):
+                raise ValueError("YOLO class identifiers must be integers.")
+            class_id = int(class_value)
+            if float(class_value) != class_id:
+                raise ValueError("YOLO class identifiers must be integers.")
+            box = tuple(float(value) for value in coordinates_xyxy)
+            if len(box) != 4 or not all(math.isfinite(value) for value in box):
+                raise ValueError("YOLO boxes must contain four finite coordinates.")
+            confidence = float(confidence_value)
+            if not math.isfinite(confidence):
+                raise ValueError("YOLO confidence values must be finite.")
+            records.append((class_id, box, confidence))
+
+        records.sort(key=lambda item: (item[0], item[1], item[2]))
+        cuvettes = [box for class_id, box, _ in records if class_id == cuvette_id]
+        liquids = [box for class_id, box, _ in records if class_id == liquid_id]
+        return records, cuvettes, liquids
+
+    @staticmethod
+    def _linear_series_error(
+        identity,
+        error_type,
+        reason,
+        *,
+        spatial_order=None,
+        related_cuvette_boxes=(),
+        related_liquid_boxes=(),
+        position=None,
+    ):
+        cuvette_boxes = tuple(
+            tuple(float(value) for value in box)
+            for box in related_cuvette_boxes
+        )
+        liquid_boxes = tuple(
+            tuple(float(value) for value in box)
+            for box in related_liquid_boxes
+        )
+        related_boxes = tuple(sorted(cuvette_boxes + liquid_boxes))
+        return {
+            "image_order": identity["image_order"],
+            "normalized_path": identity["normalized_path"],
+            "original_file_name": identity["original_file_name"],
+            "spatial_order": spatial_order,
+            "error_type": str(error_type),
+            "reason": str(reason),
+            "related_boxes": related_boxes,
+            "related_cuvette_boxes": tuple(sorted(cuvette_boxes)),
+            "related_liquid_boxes": tuple(sorted(liquid_boxes)),
+            "position": (
+                None
+                if position is None
+                else tuple(float(value) for value in position)
+            ),
+        }
+
+    @classmethod
+    def _linear_series_pairing_error(cls, identity, error):
+        error_type = error.error_type
+        if isinstance(error_type, SampleErrorType):
+            error_type = error_type.value
+        return cls._linear_series_error(
+            identity,
+            error_type,
+            error.reason,
+            related_cuvette_boxes=error.related_cuvette_boxes,
+            related_liquid_boxes=error.related_liquid_boxes,
+            position=error.position,
+        )
+
+    @staticmethod
+    def _linear_series_error_sort_key(error):
+        position = error["position"]
+        return (
+            error["error_type"],
+            position[1] if position is not None else float("inf"),
+            position[0] if position is not None else float("inf"),
+            error["spatial_order"]
+            if error["spatial_order"] is not None
+            else float("inf"),
+            error["related_cuvette_boxes"],
+            error["related_liquid_boxes"],
+            error["reason"],
+        )
+
+    @classmethod
+    def _build_linear_series_payload(
+        cls, result, settings, cv2, identity, config_warnings=None
+    ):
+        import numpy as np
+
+        original_bgr = result.orig_img
+        if (
+            not isinstance(original_bgr, np.ndarray)
+            or original_bgr.ndim != 3
+            or original_bgr.size == 0
+            or original_bgr.shape[2] != 3
+        ):
+            raise RuntimeError("YOLO did not return a valid three-channel image.")
+        annotated = original_bgr.copy()
+        warnings = [str(value) for value in (config_warnings or ())]
+        samples = []
+        errors = []
+
+        records, cuvettes, liquids = cls._typed_detection_records(result)
+        if not records:
+            errors.append(cls._linear_series_error(
+                identity,
+                SampleErrorType.IMAGE_FAILED.value,
+                "No cuvette or liquid objects were detected.",
+            ))
+        else:
+            for class_id, box, confidence in records:
+                x0, y0, x1, y1 = (int(value) for value in box)
+                x0 = min(max(x0, 0), annotated.shape[1] - 1)
+                x1 = min(max(x1, 0), annotated.shape[1] - 1)
+                y0 = min(max(y0, 0), annotated.shape[0] - 1)
+                y1 = min(max(y1, 0), annotated.shape[0] - 1)
+                cv2.rectangle(annotated, (x0, y0), (x1, y1), (0, 255, 0), 2)
+                label = str(result.names[class_id])
+                if settings["show_confidence"]:
+                    label += " {:.2f}".format(confidence)
+                cls._draw_detection_label(
+                    cv2, annotated, label, x0, y0, (0, 255, 0)
+                )
+
+            pairing = pair_cuvettes_and_liquids(
+                cuvettes,
+                liquids,
+                image_order=identity["image_order"],
+                source_file=identity["original_file_name"],
+            )
+            errors.extend(
+                cls._linear_series_pairing_error(identity, error)
+                for error in pairing.errors
+            )
+            ratios = tuple(settings[name] for name in (
+                "x0_ratio", "y0_ratio", "x1_ratio", "y1_ratio"
+            ))
+            for pair_order, (cuvette_box, liquid_box) in enumerate(
+                pairing.pairs, start=1
+            ):
+                try:
+                    roi = _calculate_rgb_roi(
+                        liquid_box, original_bgr.shape, ratios
+                    )
+                except (ArithmeticError, TypeError, ValueError) as error:
+                    errors.append(cls._linear_series_error(
+                        identity,
+                        SampleErrorType.INVALID_ROI.value,
+                        error,
+                        spatial_order=pair_order,
+                        related_cuvette_boxes=(cuvette_box,),
+                        related_liquid_boxes=(liquid_box,),
+                        position=_box_center(cuvette_box),
+                    ))
+                    continue
+                try:
+                    red, green, blue = _calculate_rgb_averages(
+                        original_bgr,
+                        roi,
+                        settings["rgb_calculate_accuracy"],
+                    )
+                except (ArithmeticError, TypeError, ValueError) as error:
+                    errors.append(cls._linear_series_error(
+                        identity,
+                        SampleErrorType.MEASUREMENT_FAILED.value,
+                        error,
+                        spatial_order=pair_order,
+                        related_cuvette_boxes=(cuvette_box,),
+                        related_liquid_boxes=(liquid_box,),
+                        position=_box_center(cuvette_box),
+                    ))
+                    continue
+
+                spatial_order = len(samples) + 1
+                sample = {
+                    "image_order": identity["image_order"],
+                    "normalized_path": identity["normalized_path"],
+                    "original_file_name": identity["original_file_name"],
+                    "spatial_order": spatial_order,
+                    "red": float(red),
+                    "green": float(green),
+                    "blue": float(blue),
+                    "cuvette_box": tuple(float(value) for value in cuvette_box),
+                    "liquid_box": tuple(float(value) for value in liquid_box),
+                    "roi_box": tuple(int(value) for value in roi),
+                }
+                samples.append(sample)
+
+                x0_roi, y0_roi, x1_roi, y1_roi = sample["roi_box"]
+                cv2.rectangle(
+                    annotated,
+                    (x0_roi, y0_roi),
+                    (x1_roi, y1_roi),
+                    (250, 240, 10),
+                    2,
+                )
+                text_lines = (
+                    ("Sample {}".format(spatial_order), (255, 0, 255)),
+                    ("R:{}".format(sample["red"]), (0, 0, 255)),
+                    ("G:{}".format(sample["green"]), (0, 255, 0)),
+                    ("B:{}".format(sample["blue"]), (255, 0, 0)),
+                )
+                layout = _text_layout(
+                    cv2,
+                    annotated.shape[0],
+                    [text for text, _ in text_lines],
+                )
+                preferred_top = int(cuvette_box[3]) + layout["thickness"] + 4
+                if preferred_top + layout["block_height"] > annotated.shape[0]:
+                    preferred_top = (
+                        int(cuvette_box[1]) - layout["block_height"] - 4
+                    )
+                cls._draw_text_block(
+                    cv2,
+                    annotated,
+                    text_lines,
+                    int(cuvette_box[0]),
+                    preferred_top,
+                )
+
+        errors.sort(key=cls._linear_series_error_sort_key)
+        if not samples and not errors:
+            errors.append(cls._linear_series_error(
+                identity,
+                SampleErrorType.IMAGE_FAILED.value,
+                "No valid RGB samples were produced.",
+            ))
+        payload = dict(identity)
+        payload.update({
+            "image": annotated,
+            "samples": samples,
+            "errors": errors,
+            "warnings": warnings,
+        })
+        return payload
+
+    @Slot(str, str, object)
+    def extract_linear_series_image(self, image_path, weight_path, context):
+        identity = None
+        try:
+            identity = self._validated_linear_series_context(
+                image_path, context
+            )
+            if type(weight_path) is not str or not weight_path:
+                raise ValueError(
+                    "Linear series weight_path must be a non-empty string."
+                )
+
+            import cv2
+            import numpy as np
+
+            settings, config_warnings, _ = load_effective_settings()
+            settings = self._linear_series_settings(settings)
+            encoded_path = np.fromfile(image_path, dtype=np.uint8)
+            if encoded_path.size == 0:
+                raise ValueError(
+                    "The Linear series image is empty: {}".format(image_path)
+                )
+            source_image = cv2.imdecode(encoded_path, cv2.IMREAD_COLOR)
+            if (
+                source_image is None
+                or source_image.ndim != 3
+                or source_image.shape[0] <= 0
+                or source_image.shape[1] <= 0
+                or source_image.shape[2] != 3
+            ):
+                raise ValueError(
+                    "The Linear series image could not be decoded: {}".format(
+                        image_path
+                    )
+                )
+
+            model = self._get_model(weight_path)
+            results = model.predict(
+                source=source_image,
+                device="cpu",
+                conf=settings["detect_confidence"],
+                save=False,
+                verbose=False,
+            )
+            if not results:
+                raise RuntimeError(
+                    "YOLO returned no result for the Linear series image."
+                )
+            payload = self._build_linear_series_payload(
+                results[0],
+                settings,
+                cv2,
+                identity,
+                config_warnings=config_warnings,
+            )
+            self.linear_series_extraction_finished.emit(payload)
+        except Exception as error:
+            if identity is None:
+                payload = self._linear_series_context_diagnostic(context, error)
+            else:
+                payload = dict(identity)
+                payload.update({
+                    "error_type": SampleErrorType.IMAGE_FAILED.value,
+                    "reason": "{}: {}".format(type(error).__name__, error),
+                    "errors": [],
+                })
+            self.linear_series_extraction_failed.emit(payload)
 
     @Slot()
     def clear_active_formulas(self):
