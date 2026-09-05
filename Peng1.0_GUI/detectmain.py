@@ -7,6 +7,7 @@ import math
 import numbers
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
@@ -38,6 +39,8 @@ from interface_config import load_effective_settings
 from yolo_detection_worker import YoloDetectionWorker
 from batch_detection_controller import BatchDetectionController
 from batch_state import DetectionScope, ImageStatus, NumberingMode
+from linear_series_controller import LinearSeriesController
+from linear_series_state import LinearSeriesPhase, LinearSeriesState
 
 
 _USE_CURRENT_RESULT = object()
@@ -57,6 +60,18 @@ DETECTION_DEFAULT_DIRECTORY = (
     / "linear_detection"
     / "detection"
 )
+LINEAR_WEIGHT_PATH = (
+    REPOSITORY_ROOT
+    / "HT-Detector_Peng"
+    / "weights"
+    / "cuvette_Peng"
+    / "yolov8n_train"
+    / "weights"
+    / "best.pt"
+)
+LINEAR_MODE_SINGLE_IMAGE = "single_image"
+LINEAR_MODE_IMAGE_SERIES = "image_series"
+_LINEAR_MODES = (LINEAR_MODE_SINGLE_IMAGE, LINEAR_MODE_IMAGE_SERIES)
 
 
 def _dialog_initial_directory(preferred_directory):
@@ -78,6 +93,7 @@ class _SaveTransactionResult:
 class DetectMain(QWidget):
     detection_requested = Signal(str, str, object)
     regression_requested = Signal(str, str)
+    linear_series_extraction_requested = Signal(str, str, object)
     clear_active_formulas_requested = Signal()
     install_saved_formulas_requested = Signal(object)
     restore_active_formulas_requested = Signal(object)
@@ -96,6 +112,17 @@ class DetectMain(QWidget):
         self._calibration_source_image = None
         self._regression_result = None
         self._regression_dirty = False
+        self._linear_mode = LINEAR_MODE_SINGLE_IMAGE
+        self._single_linear_action_text = self.ui.pushButton_4.text()
+        self._single_linear_view_state = None
+        self._linear_series_controller = LinearSeriesController(
+            LinearSeriesState(last_confirmed_result=None)
+        )
+        self._linear_series_selection_state = LinearSeriesState(
+            last_confirmed_result=None
+        )
+        self._linear_series_weight_path = None
+        self._linear_series_ui_warnings = []
         self._detection_result = None
         self._detection_dirty = False
         self._last_completed_result_type = None
@@ -300,6 +327,9 @@ class DetectMain(QWidget):
         self._detection_worker.moveToThread(self._detection_thread)
         self.detection_requested.connect(self._detection_worker.detect)
         self.regression_requested.connect(self._detection_worker.regress)
+        self.linear_series_extraction_requested.connect(
+            self._detection_worker.extract_linear_series_image
+        )
         self.clear_active_formulas_requested.connect(
             self._detection_worker.clear_active_formulas
         )
@@ -315,16 +345,23 @@ class DetectMain(QWidget):
             self._on_regression_finished
         )
         self._detection_worker.regression_failed.connect(self._on_regression_failed)
+        self._detection_worker.linear_series_extraction_finished.connect(
+            self._on_linear_series_extraction_finished
+        )
+        self._detection_worker.linear_series_extraction_failed.connect(
+            self._on_linear_series_extraction_failed
+        )
         self._detection_thread.finished.connect(self._detection_worker.deleteLater)
         self._detection_thread.finished.connect(self._on_detection_thread_finished)
         self._detection_thread.start()
 
-        self.ui.pushButton_5.clicked.connect(self._select_calibration_image)
-        self.ui.pushButton_4.clicked.connect(self._start_linear_regression)
+        self.ui.pushButton_5.clicked.connect(self._select_linear_image)
+        self.ui.pushButton_4.clicked.connect(self._start_linear_action)
         self.ui.pushButton.clicked.connect(self._select_detection_image)
         self.ui.pushButton_7.clicked.connect(self._plot_regression_result)
         self.ui.pushButton_8.clicked.connect(self._save_pending_result)
         self._reset_calibration_ui()
+        self._apply_linear_mode_controls()
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.request_shutdown)
@@ -413,6 +450,9 @@ class DetectMain(QWidget):
     def _clear_calibration_results(self):
         self._regression_result = None
         self._regression_dirty = False
+        series_controller = getattr(self, "_linear_series_controller", None)
+        if series_controller is not None and not series_controller.busy:
+            series_controller.remember_confirmed_result(None)
         self._populate_tableview(
             self.ui.tabviewOrig, self.CALIBRATION_TABLE_HEADERS, []
         )
@@ -557,11 +597,22 @@ class DetectMain(QWidget):
             text = "Save"
             available = False
         self.ui.pushButton_8.setText(text)
-        self.ui.pushButton_8.setEnabled(available and self._active_worker_task is None)
+        single_mode = (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            == LINEAR_MODE_SINGLE_IMAGE
+        )
+        self.ui.pushButton_8.setEnabled(
+            available and self._active_worker_task is None and single_mode
+        )
 
     @Slot()
     def _save_pending_result(self):
         if self._close_wait_pending or self._shutdown_requested:
+            return
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            != LINEAR_MODE_SINGLE_IMAGE
+        ):
             return
         pending = self._pending_save_type()
         if pending == "linear":
@@ -1234,6 +1285,11 @@ class DetectMain(QWidget):
 
     @Slot()
     def _plot_regression_result(self):
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            != LINEAR_MODE_SINGLE_IMAGE
+        ):
+            return
         try:
             (channel, channel_field, _plot_samples, included,
              slope, intercept, r_squared) = self._regression_plot_data()
@@ -1291,8 +1347,170 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(True)
         self._update_save_button()
 
+    @property
+    def linear_mode(self):
+        return self._linear_mode
+
+    @property
+    def linear_series_state(self):
+        return self._linear_series_controller.state
+
+    def _linear_series_has_selection(self):
+        selection = getattr(self, "_linear_series_selection_state", None)
+        if selection is None:
+            return False
+        try:
+            return bool(selection.images)
+        except Exception:
+            return False
+
+    def is_linear_interaction_locked(self):
+        controller = getattr(self, "_linear_series_controller", None)
+        return bool(
+            self._active_worker_task is not None
+            or (controller is not None and controller.busy)
+            or self._close_wait_pending
+            or self._shutdown_requested
+        )
+
+    def _capture_single_linear_view(self):
+        return (
+            self.origImg,
+            self._origPixmap,
+            self.ui.labelOrigImg.text(),
+        )
+
+    def _restore_single_linear_view(self, view_state=None):
+        state = self._single_linear_view_state if view_state is None else view_state
+        if state is None:
+            return
+        self.origImg, self._origPixmap, label_text = state
+        self.ui.labelOrigImg.setText(label_text)
+        if self._origPixmap is not None and not self._origPixmap.isNull():
+            self._scale_label(self.ui.labelOrigImg)
+        elif label_text:
+            self.ui.labelOrigImg.setText(label_text)
+        else:
+            self.ui.labelOrigImg.clear()
+
+    def _apply_linear_mode_controls(self):
+        if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
+            self.ui.pushButton_4.setText("Extract Series")
+        else:
+            self.ui.pushButton_4.setText(self._single_linear_action_text)
+        self._set_active_worker_task(self._active_worker_task)
+
+    def set_linear_mode(self, mode):
+        if type(mode) is not str or mode not in _LINEAR_MODES:
+            raise ValueError("Unknown Linear mode: {}".format(mode))
+        if self.is_linear_interaction_locked():
+            raise RuntimeError("Linear mode cannot be changed while a task is running.")
+
+        previous_mode = self._linear_mode
+        previous_controller = self._linear_series_controller
+        previous_selection = self._linear_series_selection_state
+        previous_weight_path = self._linear_series_weight_path
+        previous_single_view = self._single_linear_view_state
+        previous_display = self._capture_single_linear_view()
+        control_snapshot = tuple(
+            (button.text(), button.isEnabled())
+            for button in (
+                self.ui.pushButton_4,
+                self.ui.pushButton_5,
+                self.ui.pushButton_7,
+                self.ui.pushButton_8,
+                self.ui.pushButton,
+            )
+        )
+
+        empty_selection = None
+        if mode == LINEAR_MODE_SINGLE_IMAGE and mode != previous_mode:
+            confirmed = previous_controller.last_confirmed_result
+            if confirmed is None:
+                confirmed = self._regression_result
+            empty_selection = LinearSeriesState(
+                last_confirmed_result=confirmed
+            )
+
+        try:
+            if (
+                mode == LINEAR_MODE_IMAGE_SERIES
+                and previous_mode == LINEAR_MODE_SINGLE_IMAGE
+            ):
+                self._single_linear_view_state = previous_display
+            self._linear_mode = mode
+            if empty_selection is not None:
+                self._linear_series_weight_path = None
+                self._restore_single_linear_view(previous_single_view)
+            self._apply_linear_mode_controls()
+        except Exception:
+            self._linear_mode = previous_mode
+            self._linear_series_controller = previous_controller
+            self._linear_series_selection_state = previous_selection
+            self._linear_series_weight_path = previous_weight_path
+            self._single_linear_view_state = previous_single_view
+            try:
+                self._restore_single_linear_view(previous_display)
+            except Exception:
+                self.origImg, self._origPixmap, label_text = previous_display
+                try:
+                    self.ui.labelOrigImg.setText(label_text)
+                except Exception:
+                    pass
+            for button, (text, enabled) in zip((
+                self.ui.pushButton_4,
+                self.ui.pushButton_5,
+                self.ui.pushButton_7,
+                self.ui.pushButton_8,
+                self.ui.pushButton,
+            ), control_snapshot):
+                button.setText(text)
+                button.setEnabled(enabled)
+            raise
+
+        if empty_selection is not None:
+            previous_controller.cancel()
+            self._linear_series_selection_state = empty_selection
+            self._single_linear_view_state = None
+        return self._linear_mode
+
+    apply_linear_mode = set_linear_mode
+
+    def has_linear_series_mapping_draft(self):
+        return (
+            self._linear_series_controller.state.phase
+            == LinearSeriesPhase.MAPPING
+        )
+
+    def discard_linear_series_draft(self):
+        if self._linear_series_controller.busy:
+            raise RuntimeError("An active Linear series cannot be discarded here.")
+        controller = self._linear_series_controller
+        confirmed = controller.last_confirmed_result
+        if confirmed is None:
+            confirmed = self._regression_result
+        controller.cancel()
+        self._linear_series_selection_state = LinearSeriesState(
+            last_confirmed_result=confirmed
+        )
+        self._linear_series_weight_path = None
+        if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
+            self.origImg = None
+            self._origPixmap = QPixmap()
+            self.ui.labelOrigImg.clear()
+            self.ui.labelOrigImg.setText("Import images for a Linear series")
+            self._apply_linear_mode_controls()
+        return True
+
     def _set_active_worker_task(self, task):
-        if task not in (None, "detection", "regression", "save_linear", "save_detection"):
+        if task not in (
+            None,
+            "detection",
+            "regression",
+            "linear_series",
+            "save_linear",
+            "save_detection",
+        ):
             raise ValueError("Unknown worker task: {}".format(task))
         previous_task = self._active_worker_task
         self._active_worker_task = task
@@ -1301,13 +1519,22 @@ class DetectMain(QWidget):
             or self._close_wait_pending
             or self._shutdown_requested
         )
+        single_mode = (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            == LINEAR_MODE_SINGLE_IMAGE
+        )
         self.ui.pushButton_5.setEnabled(not busy)
         self.ui.pushButton_4.setEnabled(
-            not busy and self._calibration_source_path is not None
+            not busy
+            and (
+                self._calibration_source_path is not None
+                if single_mode
+                else self._linear_series_has_selection()
+            )
         )
         self.ui.pushButton.setEnabled(not busy)
         self.ui.pushButton_7.setEnabled(
-            not busy and self._has_valid_regression_result()
+            not busy and single_mode and self._has_valid_regression_result()
         )
         self._update_save_button()
         if previous_task is not None and task is None:
@@ -1322,7 +1549,9 @@ class DetectMain(QWidget):
         return self._batch_controller.state
 
     def is_worker_task_active(self):
-        return self._active_worker_task in ("detection", "regression")
+        return self._active_worker_task in (
+            "detection", "regression", "linear_series"
+        )
 
     def set_close_wait_pending(self, pending):
         if self._shutdown_requested and pending:
@@ -1343,7 +1572,485 @@ class DetectMain(QWidget):
         self._set_active_worker_task(None)
 
     @Slot()
+    def _select_linear_image(self):
+        if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
+            self._select_linear_series_images()
+            return
+        self._select_calibration_image()
+
+    @Slot()
+    def _start_linear_action(self):
+        if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
+            self._start_linear_series()
+            return
+        self._start_linear_regression()
+
+    @Slot()
+    def _select_linear_series_images(self):
+        if self._linear_mode != LINEAR_MODE_IMAGE_SERIES:
+            return
+        if (
+            self._close_wait_pending
+            or self._shutdown_requested
+            or self._active_worker_task is not None
+            or self._linear_series_controller.busy
+        ):
+            return
+
+        image_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select images for a Linear series",
+            str(_dialog_initial_directory(LINEAR_IMPORT_DEFAULT_DIRECTORY)),
+            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
+        )
+        if not image_paths:
+            return
+
+        controller = self._linear_series_controller
+        confirmed = controller.last_confirmed_result
+        if confirmed is None:
+            confirmed = self._regression_result
+        try:
+            candidate_state = LinearSeriesState.from_paths(
+                image_paths,
+                last_confirmed_result=confirmed,
+            )
+            first_image = candidate_state.images[0]
+            source_image = self._decode_calibration_image(
+                first_image.normalized_path
+            )
+            pixmap = self._bgr_image_to_pixmap(source_image)
+            if pixmap.isNull():
+                raise ValueError(
+                    "The first Linear series image could not be displayed."
+                )
+        except Exception as error:
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series image error",
+                str(error),
+            )
+            return
+
+        previous_orig_img = self.origImg
+        previous_pixmap = self._origPixmap
+        previous_label_text = self.ui.labelOrigImg.text()
+        previous_progress = (
+            self.ui.progressBar.minimum(),
+            self.ui.progressBar.maximum(),
+            self.ui.progressBar.value(),
+        )
+        previous_selection = self._linear_series_selection_state
+        previous_weight_path = self._linear_series_weight_path
+        control_snapshot = tuple(
+            (button.text(), button.isEnabled())
+            for button in (
+                self.ui.pushButton_4,
+                self.ui.pushButton_5,
+                self.ui.pushButton_7,
+                self.ui.pushButton_8,
+                self.ui.pushButton,
+            )
+        )
+        try:
+            self.origImg = first_image.normalized_path
+            self._origPixmap = pixmap
+            self.ui.labelOrigImg.setText("")
+            self._scale_label(self.ui.labelOrigImg)
+            self._linear_series_selection_state = candidate_state
+            self._linear_series_weight_path = None
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(0)
+            self._apply_linear_mode_controls()
+        except Exception as error:
+            self._linear_series_selection_state = previous_selection
+            self._linear_series_weight_path = previous_weight_path
+            self.origImg = previous_orig_img
+            self._origPixmap = previous_pixmap
+            self.ui.labelOrigImg.setText(previous_label_text)
+            if previous_pixmap is not None and not previous_pixmap.isNull():
+                try:
+                    self._scale_label(self.ui.labelOrigImg)
+                except Exception:
+                    pass
+            self.ui.progressBar.setRange(
+                previous_progress[0], previous_progress[1]
+            )
+            self.ui.progressBar.setValue(previous_progress[2])
+            for button, (text, enabled) in zip((
+                self.ui.pushButton_4,
+                self.ui.pushButton_5,
+                self.ui.pushButton_7,
+                self.ui.pushButton_8,
+                self.ui.pushButton,
+            ), control_snapshot):
+                button.setText(text)
+                button.setEnabled(enabled)
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series image error",
+                str(error),
+            )
+            return
+
+        controller.cancel()
+        try:
+            self.detection_status_changed.emit(
+                "Linear series selected: {} images.".format(
+                    len(candidate_state.images)
+                )
+            )
+        except Exception:
+            pass
+
+    @Slot()
+    def _start_linear_series(self):
+        if self._linear_mode != LINEAR_MODE_IMAGE_SERIES:
+            return
+        if self._close_wait_pending or self._shutdown_requested:
+            return
+        if self._active_worker_task is not None or self._linear_series_controller.busy:
+            self._show_message_safely(
+                QMessageBox.warning,
+                self,
+                "Linear series",
+                "Another task is already running.",
+            )
+            return
+        if not self._linear_series_has_selection():
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series error",
+                "Import one or more Linear series images first.",
+            )
+            return
+
+        weight_path = Path(LINEAR_WEIGHT_PATH)
+        if not weight_path.is_file():
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series error",
+                "YOLO weight file was not found:\n{}".format(weight_path),
+            )
+            return
+        try:
+            selected_paths = tuple(
+                image.normalized_path
+                for image in self._linear_series_selection_state.images
+            )
+            task = self._linear_series_controller.begin(selected_paths)
+        except Exception as error:
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series error",
+                str(error),
+            )
+            return
+        if task is None:
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series error",
+                "Import one or more Linear series images first.",
+            )
+            return
+
+        self._linear_series_weight_path = str(weight_path)
+        self._linear_series_ui_warnings = []
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(0)
+        try:
+            self._set_active_worker_task("linear_series")
+            self._dispatch_linear_series_task(task)
+        except Exception as error:
+            self._linear_series_controller.cancel()
+            self._linear_series_weight_path = None
+            self._set_active_worker_task(None)
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear series error",
+                str(error),
+            )
+
+    def _dispatch_linear_series_task(self, task):
+        if task is None:
+            self._finish_linear_series_run()
+            return
+        try:
+            self.detection_status_changed.emit(
+                "Extracting Linear series {}/{}: {}".format(
+                    task.image_order,
+                    len(self._linear_series_controller.state.images),
+                    task.original_file_name,
+                )
+            )
+        except Exception as error:
+            self._record_linear_series_ui_warning("status update", error)
+        self.linear_series_extraction_requested.emit(
+            task.normalized_path,
+            self._linear_series_weight_path,
+            task.context(),
+        )
+
+    def _linear_series_result_matches(self, payload):
+        try:
+            return self._linear_series_controller.matches_active_result(payload)
+        except Exception:
+            return False
+
+    def _prepare_linear_series_preview(self, payload):
+        if not isinstance(payload, Mapping):
+            raise ValueError("The Linear series payload must be a mapping.")
+        image = payload["image"]
+        if (
+            not isinstance(image, np.ndarray)
+            or image.ndim != 3
+            or image.size == 0
+            or image.shape[2] != 3
+            or image.dtype != np.uint8
+            or not image.flags.c_contiguous
+        ):
+            raise ValueError("The Linear series annotated image is invalid.")
+        pixmap = self._bgr_image_to_pixmap(image)
+        if pixmap.isNull():
+            raise ValueError(
+                "The Linear series annotated image could not be displayed."
+            )
+        return pixmap
+
+    @staticmethod
+    def _clean_linear_series_failure(task, error):
+        try:
+            reason = str(error).strip()
+        except Exception:
+            reason = ""
+        if not reason:
+            reason = "The Linear series result payload was invalid."
+        failure = task.context()
+        failure.update({
+            "error_type": "image_failed",
+            "reason": reason,
+            "errors": [],
+        })
+        return failure
+
+    def _accept_clean_linear_series_failure(self, task, error):
+        failure = self._clean_linear_series_failure(task, error)
+        try:
+            return self._linear_series_controller.accept_failure(failure)
+        except Exception:
+            return False
+
+    def _cancel_linear_series_after_worker_return(self):
+        if not (self._close_wait_pending or self._shutdown_requested):
+            return False
+        try:
+            cancelled = self._linear_series_controller.cancel()
+        except Exception:
+            return False
+        if not cancelled:
+            return False
+        self._linear_series_weight_path = None
+        self._set_active_worker_task(None)
+        return True
+
+    def _record_linear_series_ui_warning(self, operation, error):
+        try:
+            detail = str(error).strip()
+        except Exception:
+            detail = ""
+        warning = "{} failed{}".format(
+            operation,
+            ": {}".format(detail) if detail else "",
+        )
+        self._linear_series_ui_warnings.append(warning)
+
+    def _abort_linear_series_after_worker_return(self, error):
+        try:
+            self._linear_series_controller.cancel()
+        except Exception as cancel_error:
+            self._record_linear_series_ui_warning(
+                "Linear series cancellation", cancel_error
+            )
+        self._linear_series_weight_path = None
+        message = (
+            "Linear series extraction stopped because the worker result could "
+            "not be accepted. Previous confirmed results were preserved."
+        )
+        try:
+            detail = str(error).strip()
+        except Exception:
+            detail = ""
+        if detail:
+            message += "\n{}".format(detail)
+        try:
+            self.detection_status_changed.emit(message.replace("\n", " | "))
+        except Exception:
+            pass
+        self._show_message_safely(
+            QMessageBox.critical,
+            self,
+            "Linear series extraction stopped",
+            message,
+        )
+        self._set_active_worker_task(None)
+
+    def _after_linear_series_task_accepted(self, preview_pixmap=None):
+        if self._close_wait_pending or self._shutdown_requested:
+            self._cancel_linear_series_after_worker_return()
+            return
+
+        if preview_pixmap is not None:
+            try:
+                self._origPixmap = preview_pixmap
+                self.ui.labelOrigImg.setText("")
+                self._scale_label(self.ui.labelOrigImg)
+            except Exception as error:
+                self._record_linear_series_ui_warning("preview update", error)
+        try:
+            summary = self._linear_series_controller.summary()
+            completed = summary["successful_images"] + summary["failed_images"]
+            total = summary["total_images"]
+            self.ui.progressBar.setRange(0, 100)
+            self.ui.progressBar.setValue(
+                int(round(100 * completed / total)) if total else 0
+            )
+        except Exception as error:
+            self._record_linear_series_ui_warning("progress update", error)
+        self._advance_linear_series_run()
+
+    @Slot(object)
+    def _on_linear_series_extraction_finished(self, payload):
+        if not self._linear_series_result_matches(payload):
+            return
+        task = self._linear_series_controller.active_job
+        if task is None:
+            return
+
+        preview_pixmap = None
+        try:
+            preview_pixmap = self._prepare_linear_series_preview(payload)
+            accepted = self._linear_series_controller.accept_success(payload)
+            if not accepted:
+                raise ValueError("The Linear series result payload was not accepted.")
+        except Exception as error:
+            accepted = self._accept_clean_linear_series_failure(task, error)
+            preview_pixmap = None
+        if not accepted:
+            self._abort_linear_series_after_worker_return(
+                "The Linear series result and fallback failure were rejected."
+            )
+            return
+        self._after_linear_series_task_accepted(preview_pixmap)
+
+    @Slot(object)
+    def _on_linear_series_extraction_failed(self, payload):
+        if not self._linear_series_result_matches(payload):
+            return
+        task = self._linear_series_controller.active_job
+        if task is None:
+            return
+        try:
+            accepted = self._linear_series_controller.accept_failure(payload)
+        except Exception as error:
+            accepted = self._accept_clean_linear_series_failure(task, error)
+        else:
+            if not accepted:
+                accepted = self._accept_clean_linear_series_failure(
+                    task,
+                    "The Linear series failure payload was not accepted.",
+                )
+        if not accepted:
+            self._abort_linear_series_after_worker_return(
+                "The Linear series failure and fallback failure were rejected."
+            )
+            return
+        self._after_linear_series_task_accepted()
+
+    def _advance_linear_series_run(self):
+        task = self._linear_series_controller.next_task()
+        if task is not None:
+            self._dispatch_linear_series_task(task)
+            return
+        self._finish_linear_series_run()
+
+    @staticmethod
+    def _validated_linear_series_summary(summary):
+        fields = (
+            "total_images",
+            "successful_images",
+            "failed_images",
+            "valid_samples",
+            "sample_errors",
+        )
+        if not isinstance(summary, Mapping) or any(
+            type(summary.get(field)) is not int or summary[field] < 0
+            for field in fields
+        ):
+            return None
+        if summary["successful_images"] + summary["failed_images"] != summary["total_images"]:
+            return None
+        return {field: summary[field] for field in fields}
+
+    def _finish_linear_series_run(self):
+        summary = self._linear_series_controller.finish_if_done()
+        summary = self._validated_linear_series_summary(summary)
+        if summary is None or self._linear_series_controller.run_token is not None:
+            return
+        phase = self._linear_series_controller.state.phase
+        if phase not in (LinearSeriesPhase.MAPPING, LinearSeriesPhase.FAILED):
+            return
+
+        try:
+            try:
+                self.ui.progressBar.setRange(0, 100)
+                self.ui.progressBar.setValue(100)
+            except Exception as error:
+                self._record_linear_series_ui_warning("final progress update", error)
+            message = (
+                "Linear series extraction {}.\n"
+                "Total images: {total_images}\n"
+                "Successful images: {successful_images}\n"
+                "Failed images: {failed_images}\n"
+                "Valid samples: {valid_samples}\n"
+                "Sample errors: {sample_errors}"
+            ).format(
+                "completed" if phase == LinearSeriesPhase.MAPPING else "failed",
+                **summary
+            )
+            warnings = tuple(self._linear_series_ui_warnings)
+            if warnings:
+                message += "\nUI warnings: {}\n{}".format(
+                    len(warnings), "\n".join(warnings)
+                )
+            try:
+                self.detection_status_changed.emit(message.replace("\n", " | "))
+            except Exception as error:
+                self._record_linear_series_ui_warning("final status update", error)
+            if phase == LinearSeriesPhase.FAILED:
+                self._show_message_safely(
+                    QMessageBox.critical,
+                    self,
+                    "Linear series extraction failed",
+                    message,
+                )
+        finally:
+            self._linear_series_weight_path = None
+            self._set_active_worker_task(None)
+
+    @Slot()
     def _select_calibration_image(self):
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            != LINEAR_MODE_SINGLE_IMAGE
+        ):
+            return
         if self._close_wait_pending or self._shutdown_requested:
             return
         initial_directory = _dialog_initial_directory(
@@ -1383,6 +2090,11 @@ class DetectMain(QWidget):
 
     @Slot()
     def _start_linear_regression(self):
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            != LINEAR_MODE_SINGLE_IMAGE
+        ):
+            return
         if self._close_wait_pending or self._shutdown_requested:
             return
         if self._active_worker_task is not None:
@@ -1676,6 +2388,12 @@ class DetectMain(QWidget):
         previous_model = self.ui.tabviewOrig.model()
         previous_plot_has_result = self._regression_plot_has_result
         previous_elapsed = self.ui.lcdNumber.value()
+        series_controller = getattr(self, "_linear_series_controller", None)
+        previous_confirmed = (
+            series_controller.last_confirmed_result
+            if series_controller is not None
+            else None
+        )
         try:
             export_payload = self._validated_linear_export_payload(payload)
             pixmap = self._bgr_image_to_pixmap(export_payload["image"])
@@ -1702,6 +2420,8 @@ class DetectMain(QWidget):
                 self._last_completed_result_type = "linear"
                 self._show_calibration_plot_placeholder()
                 self.ui.lcdNumber.display(int(round(payload["elapsed_ms"])))
+                if series_controller is not None:
+                    series_controller.remember_confirmed_result(payload)
             except Exception:
                 self._regression_result = previous_result
                 self._regression_dirty = previous_dirty
@@ -1711,6 +2431,8 @@ class DetectMain(QWidget):
                 self.ui.tabviewOrig.setModel(previous_model)
                 self._scale_label(self.ui.labelOrigImg)
                 self.ui.lcdNumber.display(previous_elapsed)
+                if series_controller is not None:
+                    series_controller.remember_confirmed_result(previous_confirmed)
                 if previous_result is not None and previous_plot_has_result:
                     self._plot_regression_result()
                 else:

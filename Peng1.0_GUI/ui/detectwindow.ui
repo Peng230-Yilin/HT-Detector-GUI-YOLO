@@ -134,6 +134,13 @@
     <addaction name="menuDetection_Scope"/>
     <addaction name="menuDetection_Numbering"/>
    </widget>
+   <widget class="QMenu" name="menuLinear">
+    <property name="title">
+     <string>Linear</string>
+    </property>
+    <addaction name="actionLinear_Single_Image"/>
+    <addaction name="actionLinear_Image_Series"/>
+   </widget>
    <widget class="QMenu" name="menuWindow">
     <property name="title">
      <string>Window</string>
@@ -149,6 +156,7 @@
    <addaction name="menuEdit"/>
    <addaction name="menuView"/>
    <addaction name="menuDetection"/>
+   <addaction name="menuLinear"/>
    <addaction name="menuTools"/>
    <addaction name="menuWindow"/>
    <addaction name="menuHelp"/>
@@ -419,6 +427,15 @@
   <action name="actionDetection_Continuous">
    <property name="checkable"><bool>true</bool></property>
    <property name="text"><string>Continue Across Batch</string></property>
+  </action>
+  <action name="actionLinear_Single_Image">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="checked"><bool>true</bool></property>
+   <property name="text"><string>Single Image</string></property>
+  </action>
+  <action name="actionLinear_Image_Series">
+   <property name="checkable"><bool>true</bool></property>
+   <property name="text"><string>Image Series</string></property>
   </action>
   <action name="actionAbout_Qt_Creator">
    <property name="text">

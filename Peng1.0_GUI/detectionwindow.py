@@ -18,7 +18,11 @@ from ui import ui_detectmain
 from ui import ui_detectwindow
 from ui import ui_detectfile
 from detectfile import DetectFile
-from detectmain import DetectMain
+from detectmain import (
+    DetectMain,
+    LINEAR_MODE_IMAGE_SERIES,
+    LINEAR_MODE_SINGLE_IMAGE,
+)
 from interface_config import load_detection_preferences, save_detection_preferences
 from interface_settings_dialog import InterfaceSettingsDialog
 
@@ -90,6 +94,7 @@ class DetectWindow(QMainWindow):
             self._open_interface_settings
         )
         self._setup_detection_menu()
+        self._setup_linear_menu()
 
     def _setup_detection_menu(self):
         self._detection_scope_group = QActionGroup(self)
@@ -163,6 +168,73 @@ class DetectWindow(QMainWindow):
     def _set_detection_menu_enabled(self, busy):
         self._uiWindow.menuDetection_Scope.setEnabled(not busy)
         self._uiWindow.menuDetection_Numbering.setEnabled(not busy)
+        self._uiWindow.menuLinear.setEnabled(not busy)
+
+    def _setup_linear_menu(self):
+        self._linear_mode_group = QActionGroup(self)
+        self._linear_mode_group.setExclusive(True)
+        self._linear_mode_group.addAction(
+            self._uiWindow.actionLinear_Single_Image
+        )
+        self._linear_mode_group.addAction(
+            self._uiWindow.actionLinear_Image_Series
+        )
+        self._linear_mode = LINEAR_MODE_SINGLE_IMAGE
+        self._set_linear_menu_checked_state(self._linear_mode)
+        try:
+            self._detectMain.set_linear_mode(self._linear_mode)
+        except Exception as error:
+            QMessageBox.warning(self, "Linear mode", str(error))
+        self._linear_mode_group.triggered.connect(self._apply_linear_mode)
+
+    def _set_linear_menu_checked_state(self, mode):
+        actions = (
+            self._uiWindow.actionLinear_Single_Image,
+            self._uiWindow.actionLinear_Image_Series,
+        )
+        blockers = [QSignalBlocker(action) for action in actions]
+        try:
+            self._uiWindow.actionLinear_Single_Image.setChecked(
+                mode == LINEAR_MODE_SINGLE_IMAGE
+            )
+            self._uiWindow.actionLinear_Image_Series.setChecked(
+                mode == LINEAR_MODE_IMAGE_SERIES
+            )
+        finally:
+            blockers.clear()
+
+    @Slot(QAction)
+    def _apply_linear_mode(self, action):
+        previous_mode = self._linear_mode
+        if action is self._uiWindow.actionLinear_Single_Image:
+            requested_mode = LINEAR_MODE_SINGLE_IMAGE
+        elif action is self._uiWindow.actionLinear_Image_Series:
+            requested_mode = LINEAR_MODE_IMAGE_SERIES
+        else:
+            self._set_linear_menu_checked_state(previous_mode)
+            return False
+
+        if self._detectMain.is_linear_interaction_locked():
+            self._set_linear_menu_checked_state(previous_mode)
+            return False
+        if requested_mode == previous_mode:
+            self._set_linear_menu_checked_state(previous_mode)
+            return True
+
+        try:
+            self._detectMain.set_linear_mode(requested_mode)
+        except Exception as error:
+            try:
+                self._detectMain.set_linear_mode(previous_mode)
+            except Exception:
+                pass
+            self._set_linear_menu_checked_state(previous_mode)
+            QMessageBox.warning(self, "Linear mode", str(error))
+            return False
+
+        self._linear_mode = requested_mode
+        self._set_linear_menu_checked_state(requested_mode)
+        return True
 
     def closeEvent(self, event):
         if self._final_close_allowed:
@@ -178,17 +250,33 @@ class DetectWindow(QMainWindow):
             event.ignore()
             self._activate_close_wait_dialog()
             return
-        if self._has_unsaved_results():
+        discard_categories = self._close_discard_categories()
+        has_mapping_draft = bool(
+            "Unconfirmed Linear Series Mapping draft" in discard_categories
+        )
+        if discard_categories:
+            prompt = (
+                "Closing will discard:\n- "
+                + "\n- ".join(discard_categories)
+                + "\n\nDiscard these items and close the window?"
+            )
             answer = QMessageBox.question(
                 self,
                 "Unsaved results",
-                "There are unsaved results. Discard them and close the window?",
+                prompt,
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
+            if has_mapping_draft:
+                try:
+                    self._detectMain.discard_linear_series_draft()
+                except Exception as error:
+                    QMessageBox.warning(self, "Linear series draft", str(error))
+                    event.ignore()
+                    return
         if self._detectMain.is_worker_task_active():
             self._begin_close_wait()
             event.ignore()
@@ -197,10 +285,23 @@ class DetectWindow(QMainWindow):
         event.ignore()
 
     def _has_unsaved_results(self):
-        return bool(
-            self._detectMain._regression_dirty
-            or self._detectMain._detection_dirty
+        return bool(self._close_discard_categories())
+
+    def _close_discard_categories(self):
+        categories = []
+        if self._has_linear_series_mapping_draft():
+            categories.append("Unconfirmed Linear Series Mapping draft")
+        if self._detectMain._regression_dirty:
+            categories.append("Unsaved Linear result")
+        if self._detectMain._detection_dirty:
+            categories.append("Unsaved Detection result")
+        return tuple(categories)
+
+    def _has_linear_series_mapping_draft(self):
+        checker = getattr(
+            self._detectMain, "has_linear_series_mapping_draft", None
         )
+        return bool(checker()) if callable(checker) else False
 
     def _begin_close_wait(self):
         if self._close_wait_pending or self._shutdown_started:
