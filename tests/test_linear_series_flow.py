@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import numpy as np
+from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 
@@ -55,6 +56,8 @@ class WidgetStub:
         self.value_value = 0
         self.range_value = (0, 100)
         self.pixmap = None
+        self.model_value = None
+        self.tab_texts = {0: "Detection Image"}
         self.calls = []
 
     def setEnabled(self, enabled):
@@ -93,7 +96,26 @@ class WidgetStub:
         self.calls.append(("setPixmap", pixmap))
 
     def clear(self):
+        self.text_value = ""
+        self.pixmap = None
         self.calls.append(("clear",))
+
+    def setModel(self, model):
+        self.model_value = model
+        self.calls.append(("setModel", model))
+
+    def model(self):
+        return self.model_value
+
+    def indexOf(self, _widget):
+        return 0
+
+    def setTabText(self, index, text):
+        self.tab_texts[index] = str(text)
+        self.calls.append(("setTabText", index, str(text)))
+
+    def tabText(self, index):
+        return self.tab_texts.get(index, "")
 
     def setAlignment(self, alignment):
         self.calls.append(("setAlignment", alignment))
@@ -117,6 +139,12 @@ class UiStub:
             "pushButton_8",
             "progressBar",
             "labelOrigImg",
+            "labelRecgImg",
+            "label_4",
+            "tabviewOrig",
+            "tabviewRecg",
+            "tabWidget",
+            "tab_3",
             "lcdNumber",
         ):
             self._widgets[name] = WidgetStub()
@@ -175,6 +203,9 @@ class FlowHarness:
         self._last_calibration_directory = "single-directory-preserved"
         self.origImg = "single-preview-preserved"
         self._origPixmap = PixmapStub("single-preview-preserved")
+        self._recgPixmap = None
+        self._detection_view_state = None
+        self._linear_series_result_view_state = None
         self.ui = UiStub()
         self.mainCamera = CameraStub()
 
@@ -192,6 +223,7 @@ class FlowHarness:
         self.scale_calls = []
         self.messages = []
         self.save_updates = 0
+        self.shutdown_request_calls = 0
 
     def __getattr__(self, name):
         value = DetectMain.__dict__.get(name)
@@ -221,6 +253,10 @@ class FlowHarness:
 
     def _show_message_safely(self, message_function, *arguments):
         self.messages.append((message_function, arguments))
+
+    def request_shutdown(self):
+        self.shutdown_request_calls += 1
+        self._shutdown_requested = True
 
     def _set_active_worker_task(self, task):
         return DetectMain._set_active_worker_task(self, task)
@@ -292,6 +328,33 @@ class MappingCloseHarness:
         self._shutdown_started = True
 
 
+class ActiveCloseHarness:
+    _cancel_close_wait = detectionwindow.DetectWindow._cancel_close_wait
+    _on_worker_task_finished = (
+        detectionwindow.DetectWindow._on_worker_task_finished
+    )
+
+    def __init__(self, detect_main):
+        self._detectMain = detect_main
+        self._close_wait_pending = True
+        self._shutdown_started = False
+        self._close_wait_dialog = None
+        self.dispose_calls = 0
+        self.shutdown_calls = 0
+        self.control_states = []
+
+    def _dispose_close_wait_dialog(self):
+        self.dispose_calls += 1
+        self._close_wait_dialog = None
+
+    def _set_close_controls_disabled(self, disabled):
+        self.control_states.append(bool(disabled))
+
+    def _begin_shutdown(self):
+        self.shutdown_calls += 1
+        return detectionwindow.DetectWindow._begin_shutdown(self)
+
+
 class IdentityOnlyPayload(Mapping):
     """Raise if a rejected or closing result reads non-identity content."""
 
@@ -308,6 +371,55 @@ class IdentityOnlyPayload(Mapping):
 
     def __len__(self):
         return len(self._identity)
+
+
+class PoisonContentPayload(Mapping):
+    """Expose identity, but fail if rejected payload content is inspected."""
+
+    _poison_fields = ("image", "samples", "reason")
+
+    def __init__(self, identity):
+        self._identity = dict(identity)
+        self.poison_reads = []
+
+    def __getitem__(self, key):
+        if key in self._identity:
+            return self._identity[key]
+        self.poison_reads.append(key)
+        raise AssertionError("poison payload field was read: {}".format(key))
+
+    def __iter__(self):
+        return iter(tuple(self._identity) + self._poison_fields)
+
+    def __len__(self):
+        return len(self._identity) + len(self._poison_fields)
+
+
+class MemoryCallbackWorker(QObject):
+    payload_ready = Signal(object)
+    work_finished = Signal()
+
+    def __init__(self, payload):
+        super().__init__()
+        self.payload = payload
+
+    @Slot()
+    def run(self):
+        self.payload_ready.emit(self.payload)
+        self.work_finished.emit()
+
+
+class MemoryCallbackReceiver(QObject):
+    handled = Signal()
+
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    @Slot(object)
+    def receive(self, payload):
+        self.callback(payload)
+        self.handled.emit()
 
 
 def memory_image():
@@ -396,6 +508,11 @@ def flow_snapshot(harness):
         harness.origImg,
         id(harness._origPixmap),
         harness.ui.labelOrigImg.text(),
+        id(harness._recgPixmap),
+        harness.ui.labelRecgImg.text(),
+        id(harness.ui.tabviewRecg.model()),
+        harness.ui.tabWidget.tabText(0),
+        harness.ui.label_4.text(),
         id(harness._regression_result),
         harness._regression_dirty,
         id(harness._detection_result),
@@ -470,6 +587,33 @@ class LinearSeriesFlowTests(unittest.TestCase):
             invoke(harness, "_start_linear_series")
         self.assertEqual(critical.call_count, 0)
         return checked_paths
+
+    def deliver_from_memory_thread(self, callback, payload):
+        thread = QThread()
+        worker = MemoryCallbackWorker(payload)
+        receiver = MemoryCallbackReceiver(callback)
+        loop = QEventLoop()
+        handled = []
+        timed_out = []
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: (timed_out.append(True), loop.quit()))
+        receiver.handled.connect(lambda: (handled.append(True), loop.quit()))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.payload_ready.connect(receiver.receive)
+        worker.work_finished.connect(worker.deleteLater)
+        worker.work_finished.connect(thread.quit)
+
+        thread.start()
+        timer.start(3000)
+        loop.exec()
+        timer.stop()
+        thread.quit()
+        self.assertTrue(thread.wait(3000))
+        self.assertEqual(timed_out, [])
+        self.assertEqual(handled, [True])
+        self.assertFalse(thread.isRunning())
 
     def test_multi_select_cancel_is_a_complete_no_op(self):
         harness = FlowHarness([VIRTUAL_ROOT + "/old7.PNG"])
@@ -690,6 +834,119 @@ class LinearSeriesFlowTests(unittest.TestCase):
             LinearSeriesPhase.MAPPING,
         )
 
+    def test_only_successful_series_images_own_the_visible_result_pane(self):
+        harness = FlowHarness([
+            VIRTUAL_ROOT + "/image1.png",
+            VIRTUAL_ROOT + "/image2.png",
+        ])
+        self.start_series(harness)
+        first = harness._linear_series_controller.active_job
+        first_payload = success_payload(first)
+
+        invoke(harness, "_on_linear_series_extraction_finished", first_payload)
+
+        model = harness.ui.tabviewRecg.model()
+        self.assertIs(harness._recgPixmap.source, first_payload["image"])
+        self.assertIn(first.original_file_name, harness.ui.tabWidget.tabText(0))
+        self.assertEqual(model.rowCount(), 1)
+        self.assertEqual(model.item(0, 0).text(), "1")
+        self.assertEqual(model.item(0, 1).text(), "")
+        self.assertEqual(model.item(0, 2).text(), "10.00")
+        successful_view = (
+            harness._recgPixmap,
+            model,
+            harness.ui.tabWidget.tabText(0),
+            harness.ui.label_4.text(),
+        )
+
+        second = harness._linear_series_controller.active_job
+        invoke(
+            harness,
+            "_on_linear_series_extraction_failed",
+            failure_payload(second, "second failed"),
+        )
+
+        self.assertEqual((
+            harness._recgPixmap,
+            harness.ui.tabviewRecg.model(),
+            harness.ui.tabWidget.tabText(0),
+            harness.ui.label_4.text(),
+        ), successful_view)
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
+
+    def test_partial_sample_error_view_contains_only_valid_numbered_samples(self):
+        harness = FlowHarness([VIRTUAL_ROOT + "/partial.png"])
+        self.start_series(harness)
+        task = harness._linear_series_controller.active_job
+        payload = success_payload(task, errors=[{
+            "reason": "second sample has an invalid ROI",
+            "error_type": "invalid_roi",
+            "spatial_order": 2,
+        }])
+
+        invoke(harness, "_on_linear_series_extraction_finished", payload)
+
+        image = harness._linear_series_controller.state.images[0]
+        model = harness.ui.tabviewRecg.model()
+        self.assertEqual(image.status, LinearImageStatus.COMPLETED)
+        self.assertEqual(len(image.samples), 1)
+        self.assertEqual(len(image.errors), 1)
+        self.assertEqual(model.rowCount(), 1)
+        self.assertEqual(model.item(0, 0).text(), "1")
+        self.assertEqual(model.item(0, 1).text(), "")
+        self.assertEqual(
+            tuple(model.item(0, column).text() for column in (2, 3, 4)),
+            ("10.00", "20.00", "30.00"),
+        )
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
+
+    def test_zero_sample_success_payload_is_failed_and_never_displayed(self):
+        harness = FlowHarness([VIRTUAL_ROOT + "/empty.png"])
+        self.start_series(harness)
+        task = harness._linear_series_controller.active_job
+        payload = success_payload(task, samples=[], errors=[])
+
+        invoke(harness, "_on_linear_series_extraction_finished", payload)
+
+        image = harness._linear_series_controller.state.images[0]
+        self.assertEqual(image.status, LinearImageStatus.FAILED)
+        self.assertEqual(image.samples, ())
+        self.assertIsNone(harness._recgPixmap)
+        model = harness.ui.tabviewRecg.model()
+        self.assertTrue(model is None or model.rowCount() == 0)
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.critical)
+
+    def test_rerun_clears_previous_series_view_before_dispatch(self):
+        harness = FlowHarness([VIRTUAL_ROOT + "/image1.png"])
+        self.start_series(harness)
+        first_run = harness._linear_series_controller.active_job
+        invoke(
+            harness,
+            "_on_linear_series_extraction_finished",
+            success_payload(first_run),
+        )
+        self.assertIsNotNone(harness._recgPixmap)
+        self.assertEqual(harness.ui.tabviewRecg.model().rowCount(), 1)
+
+        self.start_series(harness)
+
+        second_run = harness._linear_series_controller.active_job
+        self.assertGreater(second_run.run_token, first_run.run_token)
+        self.assertIsNone(harness._recgPixmap)
+        self.assertEqual(harness.ui.tabviewRecg.model().rowCount(), 0)
+        self.assertEqual(
+            harness.ui.tabWidget.tabText(0), "Linear Series Image"
+        )
+        self.assertEqual(
+            harness.ui.label_4.text(), "Table. Linear Series"
+        )
+        self.assertEqual(
+            len(harness.linear_series_extraction_requested.calls), 2
+        )
+
     def test_duplicate_paths_dispatch_as_distinct_jobs(self):
         repeated = VIRTUAL_ROOT + "/same-name.png"
         harness = FlowHarness([repeated, repeated])
@@ -810,6 +1067,30 @@ class LinearSeriesFlowTests(unittest.TestCase):
             failure_payload(second, "late"),
         )
         self.assertEqual(flow_snapshot(harness), finished)
+
+    def test_wrong_path_rejects_poison_content_before_any_ui_side_effect(self):
+        harness = FlowHarness([
+            VIRTUAL_ROOT + "/image1.png",
+            VIRTUAL_ROOT + "/image2.png",
+        ])
+        self.start_series(harness)
+        task = harness._linear_series_controller.active_job
+        wrong_identity = task.context()
+        wrong_identity["normalized_path"] = VIRTUAL_ROOT + "/wrong.png"
+        payload = PoisonContentPayload(wrong_identity)
+        before = flow_snapshot(harness)
+        hidden_views = (
+            harness._detection_view_state,
+            harness._linear_series_result_view_state,
+        )
+
+        invoke(harness, "_on_linear_series_extraction_finished", payload)
+        invoke(harness, "_on_linear_series_extraction_failed", payload)
+
+        self.assertEqual(payload.poison_reads, [])
+        self.assertEqual(flow_snapshot(harness), before)
+        self.assertIs(harness._detection_view_state, hidden_views[0])
+        self.assertIs(harness._linear_series_result_view_state, hidden_views[1])
 
     def test_invalid_legal_payload_becomes_clean_current_image_failure(self):
         harness = FlowHarness([
@@ -984,7 +1265,7 @@ class LinearSeriesFlowTests(unittest.TestCase):
             baseline_dispatches,
         )
 
-    def test_pending_close_cancels_after_even_clean_failure_is_rejected(self):
+    def test_pending_close_cancels_before_malformed_result_is_processed(self):
         harness = FlowHarness([
             VIRTUAL_ROOT + "/image1.png",
             VIRTUAL_ROOT + "/image2.png",
@@ -1022,7 +1303,8 @@ class LinearSeriesFlowTests(unittest.TestCase):
             len(harness.linear_series_extraction_requested.calls),
             dispatch_count,
         )
-        self.assertEqual(len(harness.detection_status_changed.calls), status_count + 1)
+        self.assertEqual(len(harness.detection_status_changed.calls), status_count)
+        self.assertEqual(harness.messages, [])
         self.assertEqual((
             harness.ui.progressBar.range_value,
             harness.ui.progressBar.value_value,
@@ -1105,9 +1387,9 @@ class LinearSeriesFlowTests(unittest.TestCase):
         ])
         self.start_series(harness)
         label = FailingPreview()
-        harness.ui._widgets["labelOrigImg"] = label
+        harness.ui._widgets["labelRecgImg"] = label
         harness._scale_label = lambda target: target.setPixmap(
-            harness._origPixmap
+            harness._recgPixmap
         )
         harness.detection_status_changed = FailingStatus()
 
@@ -1138,7 +1420,8 @@ class LinearSeriesFlowTests(unittest.TestCase):
             "UI warnings:",
             harness.detection_status_changed.calls[-1][0],
         )
-        self.assertEqual(harness.messages, [])
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
 
     def test_final_progress_warning_is_in_the_single_final_summary(self):
         class FailingFinalProgress(WidgetStub):
@@ -1190,7 +1473,9 @@ class LinearSeriesFlowTests(unittest.TestCase):
         self.assertIn("Valid samples: 1", final_summaries[0])
         self.assertIn("Sample errors: 0", final_summaries[0])
         self.assertEqual(len(harness.linear_series_extraction_requested.calls), 1)
-        self.assertEqual(harness.messages, [])
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
+        self.assertEqual(harness.messages[0][1][2].count(warning), 1)
 
     def test_preview_then_final_progress_warnings_keep_order_in_summary(self):
         class FailingPreview(WidgetStub):
@@ -1211,10 +1496,10 @@ class LinearSeriesFlowTests(unittest.TestCase):
                         raise RuntimeError("probe final progress")
 
         harness = FlowHarness([VIRTUAL_ROOT + "/only-image.png"])
-        harness.ui._widgets["labelOrigImg"] = FailingPreview()
+        harness.ui._widgets["labelRecgImg"] = FailingPreview()
         harness.ui._widgets["progressBar"] = FailingFinalProgress()
         harness._scale_label = lambda target: target.setPixmap(
-            harness._origPixmap
+            harness._recgPixmap
         )
         self.start_series(harness)
         controller = harness._linear_series_controller
@@ -1260,7 +1545,176 @@ class LinearSeriesFlowTests(unittest.TestCase):
             "sample_errors": 0,
         })
         self.assertEqual(len(harness.linear_series_extraction_requested.calls), 1)
-        self.assertEqual(harness.messages, [])
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
+        public_summary = harness.messages[0][1][2]
+        for warning in warnings:
+            self.assertEqual(public_summary.count(warning), 1)
+
+    def test_public_summary_groups_equal_warning_text_as_occurrences(self):
+        class AlwaysFailingPreview(WidgetStub):
+            def setPixmap(self, pixmap):
+                super().setPixmap(pixmap)
+                raise RuntimeError("same preview failure")
+
+        harness = FlowHarness([
+            VIRTUAL_ROOT + "/image1.png",
+            VIRTUAL_ROOT + "/image2.png",
+        ])
+        harness.ui._widgets["labelRecgImg"] = AlwaysFailingPreview()
+        harness._scale_label = lambda target: target.setPixmap(
+            harness._recgPixmap
+        )
+        self.start_series(harness)
+        for _ in range(2):
+            task = harness._linear_series_controller.active_job
+            invoke(
+                harness,
+                "_on_linear_series_extraction_finished",
+                success_payload(task),
+            )
+
+        warning = "preview update failed: same preview failure"
+        self.assertEqual(harness._linear_series_ui_warnings, [warning, warning])
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
+        public_summary = harness.messages[0][1][2]
+        self.assertIn("UI warnings: 2", public_summary)
+        self.assertEqual(public_summary.count(warning), 1)
+        self.assertIn(warning + " (2 occurrences)", public_summary.splitlines())
+
+    def test_public_summary_keeps_first_warning_order_and_single_event_plain(self):
+        harness = FlowHarness([VIRTUAL_ROOT + "/only-image.png"])
+        self.start_series(harness)
+        invoke(
+            harness,
+            "_record_linear_series_ui_warning",
+            "preview update",
+            RuntimeError("first"),
+        )
+        invoke(
+            harness,
+            "_record_linear_series_ui_warning",
+            "final status update",
+            RuntimeError("second"),
+        )
+        task = harness._linear_series_controller.active_job
+        invoke(
+            harness,
+            "_on_linear_series_extraction_finished",
+            success_payload(task),
+        )
+
+        first = "preview update failed: first"
+        second = "final status update failed: second"
+        self.assertEqual(harness._linear_series_ui_warnings, [first, second])
+        self.assertEqual(len(harness.messages), 1)
+        public_summary = harness.messages[0][1][2]
+        self.assertIn("UI warnings: 2", public_summary)
+        self.assertLess(public_summary.index(first), public_summary.index(second))
+        self.assertEqual(public_summary.count(first), 1)
+        self.assertEqual(public_summary.count(second), 1)
+        self.assertNotIn("occurrences", public_summary)
+
+    def test_final_summary_dialog_type_title_statistics_and_repeat_matrix(self):
+        cases = (
+            (
+                "success",
+                ("success",),
+                None,
+                detectmain.QMessageBox.information,
+                "Linear series extraction completed",
+                (1, 1, 0, 1, 0),
+            ),
+            (
+                "failed_image",
+                ("success", "failure"),
+                None,
+                detectmain.QMessageBox.warning,
+                "Linear series extraction partially completed",
+                (2, 1, 1, 1, 1),
+            ),
+            (
+                "sample_error",
+                ("sample_error",),
+                None,
+                detectmain.QMessageBox.warning,
+                "Linear series extraction partially completed",
+                (1, 1, 0, 1, 1),
+            ),
+            (
+                "ui_warning",
+                ("success",),
+                "synthetic UI warning",
+                detectmain.QMessageBox.warning,
+                "Linear series extraction partially completed",
+                (1, 1, 0, 1, 0),
+            ),
+            (
+                "all_failed",
+                ("failure",),
+                None,
+                detectmain.QMessageBox.critical,
+                "Linear series extraction failed",
+                (1, 0, 1, 0, 1),
+            ),
+        )
+        labels = (
+            "Total images",
+            "Successful images",
+            "Failed images",
+            "Valid samples",
+            "Sample errors",
+        )
+
+        for name, outcomes, ui_warning, message_type, title, counts in cases:
+            with self.subTest(name=name):
+                harness = FlowHarness([
+                    VIRTUAL_ROOT + "/{}-{}.png".format(name, index)
+                    for index in range(1, len(outcomes) + 1)
+                ])
+                self.start_series(harness)
+                if ui_warning is not None:
+                    invoke(
+                        harness,
+                        "_record_linear_series_ui_warning",
+                        "probe",
+                        RuntimeError(ui_warning),
+                    )
+                for outcome in outcomes:
+                    task = harness._linear_series_controller.active_job
+                    if outcome == "success":
+                        invoke(
+                            harness,
+                            "_on_linear_series_extraction_finished",
+                            success_payload(task),
+                        )
+                    elif outcome == "sample_error":
+                        invoke(
+                            harness,
+                            "_on_linear_series_extraction_finished",
+                            success_payload(task, errors=[{
+                                "reason": "one sample failed",
+                                "error_type": "invalid_roi",
+                                "spatial_order": 2,
+                            }]),
+                        )
+                    else:
+                        invoke(
+                            harness,
+                            "_on_linear_series_extraction_failed",
+                            failure_payload(task, "image failed"),
+                        )
+
+                self.assertEqual(len(harness.messages), 1)
+                function, arguments = harness.messages[0]
+                self.assertIs(function, message_type)
+                self.assertEqual(arguments[1], title)
+                body = arguments[2]
+                for label, count in zip(labels, counts):
+                    self.assertIn("{}: {}".format(label, count), body)
+                invoke(harness, "_finish_linear_series_run")
+                self.assertEqual(len(harness.messages), 1)
 
     def test_partial_success_finishes_in_mapping_and_retains_draft(self):
         harness = FlowHarness([
@@ -1297,7 +1751,8 @@ class LinearSeriesFlowTests(unittest.TestCase):
         self.assertTrue(harness._regression_dirty)
         self.assertIsNone(controller.run_token)
         self.assertIsNone(harness._active_worker_task)
-        self.assertEqual(harness.messages, [])
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.warning)
 
     def test_all_failed_stays_failed_and_reports_only_one_summary_dialog(self):
         harness = FlowHarness([
@@ -1393,6 +1848,15 @@ class LinearSeriesFlowTests(unittest.TestCase):
         self.assertEqual(active_tasks_at_finish, ["linear_series"])
         self.assertIsNone(controller.run_token)
         self.assertIsNone(harness._active_worker_task)
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.information)
+        finished = flow_snapshot(harness)
+        invoke(
+            harness,
+            "_on_linear_series_extraction_finished",
+            success_payload(task),
+        )
+        self.assertEqual(flow_snapshot(harness), finished)
 
     def test_pending_close_cancels_remaining_without_dispatch_or_ui_updates(self):
         harness = FlowHarness([
@@ -1437,6 +1901,7 @@ class LinearSeriesFlowTests(unittest.TestCase):
         ), progress)
         self.assertIsNone(harness._active_worker_task)
         self.assertEqual(len(harness.worker_task_finished.calls), 1)
+        self.assertEqual(harness.messages, [])
 
         closed_snapshot = flow_snapshot(harness)
         invoke(
@@ -1445,6 +1910,143 @@ class LinearSeriesFlowTests(unittest.TestCase):
             failure_payload(first, "late after cancel"),
         )
         self.assertEqual(flow_snapshot(harness), closed_snapshot)
+
+    def test_real_qthread_current_close_callbacks_shutdown_exactly_once(self):
+        class CloseContinuationSignal(SignalSpy):
+            def __init__(self, callback):
+                super().__init__()
+                self.callback = callback
+
+            def emit(self, *arguments):
+                super().emit(*arguments)
+                self.callback()
+
+        for result_type in ("success", "failure"):
+            with self.subTest(result_type=result_type):
+                harness = FlowHarness([
+                    VIRTUAL_ROOT + "/current.png",
+                    VIRTUAL_ROOT + "/remaining.png",
+                ])
+                self.start_series(harness)
+                task = harness._linear_series_controller.active_job
+                close = ActiveCloseHarness(harness)
+                harness.worker_task_finished = CloseContinuationSignal(
+                    close._on_worker_task_finished
+                )
+                harness.set_close_wait_pending(True)
+                if result_type == "success":
+                    callback = lambda payload: invoke(
+                        harness,
+                        "_on_linear_series_extraction_finished",
+                        payload,
+                    )
+                    payload = success_payload(task)
+                else:
+                    callback = lambda payload: invoke(
+                        harness,
+                        "_on_linear_series_extraction_failed",
+                        payload,
+                    )
+                    payload = failure_payload(task, "current failure")
+
+                self.deliver_from_memory_thread(callback, payload)
+
+                controller = harness._linear_series_controller
+                self.assertEqual(controller.state.phase, LinearSeriesPhase.CANCELLED)
+                self.assertIsNone(controller.run_token)
+                self.assertIsNone(controller.active_job)
+                self.assertIsNone(harness._active_worker_task)
+                self.assertEqual(len(harness.linear_series_extraction_requested.calls), 1)
+                self.assertEqual(harness.messages, [])
+                self.assertEqual(len(harness.worker_task_finished.calls), 1)
+                self.assertEqual(close.dispose_calls, 1)
+                self.assertEqual(close.shutdown_calls, 1)
+                self.assertEqual(harness.shutdown_request_calls, 1)
+                close._on_worker_task_finished()
+                self.assertEqual(close.shutdown_calls, 1)
+                self.assertEqual(harness.shutdown_request_calls, 1)
+
+    def test_real_qthread_stale_then_cancel_close_allows_one_summary(self):
+        class CloseContinuationSignal(SignalSpy):
+            def __init__(self, callback):
+                super().__init__()
+                self.callback = callback
+
+            def emit(self, *arguments):
+                super().emit(*arguments)
+                self.callback()
+
+        harness = FlowHarness([VIRTUAL_ROOT + "/only-image.png"])
+        self.start_series(harness)
+        task = harness._linear_series_controller.active_job
+        close = ActiveCloseHarness(harness)
+        harness.worker_task_finished = CloseContinuationSignal(
+            close._on_worker_task_finished
+        )
+        harness.set_close_wait_pending(True)
+        stale = failure_payload(task, "stale failure")
+        stale["job_token"] += 1
+        before = flow_snapshot(harness)
+
+        self.deliver_from_memory_thread(
+            lambda payload: invoke(
+                harness, "_on_linear_series_extraction_failed", payload
+            ),
+            stale,
+        )
+
+        self.assertEqual(flow_snapshot(harness), before)
+        self.assertTrue(close._close_wait_pending)
+        self.assertEqual(close.shutdown_calls, 0)
+        self.assertEqual(harness.shutdown_request_calls, 0)
+
+        close._cancel_close_wait()
+        self.assertFalse(close._close_wait_pending)
+        self.assertFalse(harness._close_wait_pending)
+        self.deliver_from_memory_thread(
+            lambda payload: invoke(
+                harness, "_on_linear_series_extraction_finished", payload
+            ),
+            success_payload(task),
+        )
+
+        self.assertEqual(len(harness.messages), 1)
+        self.assertIs(harness.messages[0][0], detectmain.QMessageBox.information)
+        self.assertEqual(len(harness.worker_task_finished.calls), 1)
+        self.assertEqual(close.shutdown_calls, 0)
+        self.assertEqual(harness.shutdown_request_calls, 0)
+        finished = flow_snapshot(harness)
+        invoke(
+            harness,
+            "_on_linear_series_extraction_finished",
+            success_payload(task),
+        )
+        self.assertEqual(flow_snapshot(harness), finished)
+
+    def test_shutdown_return_cancels_without_result_view_or_summary(self):
+        harness = FlowHarness([VIRTUAL_ROOT + "/only-image.png"])
+        self.start_series(harness)
+        controller = harness._linear_series_controller
+        task = controller.active_job
+        payload = success_payload(task)
+        harness._shutdown_requested = True
+        before_view = (
+            harness._recgPixmap,
+            harness.ui.tabviewRecg.model(),
+            harness.ui.labelRecgImg.text(),
+        )
+
+        invoke(harness, "_on_linear_series_extraction_finished", payload)
+
+        self.assertEqual(controller.state.phase, LinearSeriesPhase.CANCELLED)
+        self.assertIsNone(controller.run_token)
+        self.assertIsNone(harness._active_worker_task)
+        self.assertEqual(harness.messages, [])
+        self.assertEqual((
+            harness._recgPixmap,
+            harness.ui.tabviewRecg.model(),
+            harness.ui.labelRecgImg.text(),
+        ), before_view)
 
     def test_mapping_close_asks_once_and_reject_is_a_complete_no_op(self):
         harness = MappingCloseHarness()

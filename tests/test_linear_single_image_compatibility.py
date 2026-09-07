@@ -5,6 +5,21 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+import numpy as np
+from PySide6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QLCDNumber,
+    QProgressBar,
+    QPushButton,
+    QTabWidget,
+    QTableView,
+    QWidget,
+)
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GUI_ROOT = PROJECT_ROOT / "Peng1.0_GUI"
@@ -79,6 +94,7 @@ class FakeLabel:
     def __init__(self, text=""):
         self._text = text
         self.clear_count = 0
+        self.pixmap = None
 
     def text(self):
         return self._text
@@ -88,7 +104,62 @@ class FakeLabel:
 
     def clear(self):
         self._text = ""
+        self.pixmap = None
         self.clear_count += 1
+
+    def setPixmap(self, pixmap):
+        self.pixmap = pixmap
+
+
+class FakeTableView:
+    def __init__(self, model=None):
+        self._model = model
+
+    def model(self):
+        return self._model
+
+    def setModel(self, model):
+        self._model = model
+
+
+class FakeValueWidget:
+    def __init__(self, value=0, minimum=0, maximum=100):
+        self._value = value
+        self._minimum = minimum
+        self._maximum = maximum
+
+    def value(self):
+        return self._value
+
+    def display(self, value):
+        self._value = value
+
+    def setValue(self, value):
+        self._value = value
+
+    def setRange(self, minimum, maximum):
+        self._minimum = minimum
+        self._maximum = maximum
+
+    def minimum(self):
+        return self._minimum
+
+    def maximum(self):
+        return self._maximum
+
+
+class FakeTabWidget:
+    def __init__(self, text="Detection Image"):
+        self._text = text
+
+    def indexOf(self, _widget):
+        return 0
+
+    def tabText(self, _index):
+        return self._text
+
+    def setTabText(self, _index, text):
+        self._text = str(text)
 
 
 class FakePixmap:
@@ -114,12 +185,18 @@ class DetectMainModeHarness:
     _linear_series_has_selection = DetectMain._linear_series_has_selection
     _capture_single_linear_view = DetectMain._capture_single_linear_view
     _restore_single_linear_view = DetectMain._restore_single_linear_view
+    _capture_result_pane_view = DetectMain._capture_result_pane_view
+    _apply_result_pane_view = DetectMain._apply_result_pane_view
+    _empty_linear_series_result_view = DetectMain._empty_linear_series_result_view
+    _publish_detection_result_view = DetectMain._publish_detection_result_view
     _apply_linear_mode_controls = DetectMain._apply_linear_mode_controls
     _set_active_worker_task = DetectMain._set_active_worker_task
     is_worker_task_active = DetectMain.is_worker_task_active
     is_linear_interaction_locked = DetectMain.is_linear_interaction_locked
 
     def __init__(self):
+        self.single_table_model = object()
+        self.detection_table_model = object()
         self.ui = SimpleNamespace(
             pushButton_4=FakeButton("Linear Regression"),
             pushButton_5=FakeButton("Import Image"),
@@ -127,12 +204,23 @@ class DetectMainModeHarness:
             pushButton_8=FakeButton("Save", False),
             pushButton=FakeButton("Import Detection"),
             labelOrigImg=FakeLabel("single preview"),
+            labelRecgImg=FakeLabel(""),
+            label_4=FakeLabel("Table. Detection"),
+            tabviewOrig=FakeTableView(self.single_table_model),
+            tabviewRecg=FakeTableView(self.detection_table_model),
+            tabWidget=FakeTabWidget(),
+            tab_3=object(),
+            progressBar=FakeValueWidget(37, 0, 100),
+            lcdNumber=FakeValueWidget(246),
         )
         self._linear_mode = detectmain_module.LINEAR_MODE_SINGLE_IMAGE
         self._single_linear_action_text = "Linear Regression"
         self._single_linear_view_state = None
+        self._detection_view_state = None
+        self._linear_series_result_view_state = None
         self._calibration_source_path = "memory/single.png"
         self._calibration_source_image = object()
+        self._last_calibration_directory = "memory"
         self._active_worker_task = None
         self._close_wait_pending = False
         self._shutdown_requested = False
@@ -149,6 +237,7 @@ class DetectMainModeHarness:
 
         self.origImg = "memory/single-annotated.png"
         self._origPixmap = FakePixmap("single")
+        self._recgPixmap = FakePixmap("detection")
         self._linear_series_controller = LinearSeriesController(
             LinearSeriesState(last_confirmed_result=self._regression_result)
         )
@@ -173,6 +262,7 @@ class DetectMainModeHarness:
         self._valid_regression = True
         self._valid_linear_export = True
         self._valid_detection_export = True
+        self.plot_restore_calls = 0
 
         self._set_active_worker_task(None)
 
@@ -188,10 +278,121 @@ class DetectMainModeHarness:
     def _has_valid_detection_export(self):
         return self._valid_detection_export
 
+    def _build_table_model(self, headers, rows):
+        return DetectMain._build_table_model(headers, rows)
+
+    def _plot_regression_result(self):
+        self.plot_restore_calls += 1
+        self._regression_plot_has_result = True
+
+    def _show_calibration_plot_placeholder(self):
+        self._regression_plot_has_result = False
+
+
+class RealQtModeHarness(DetectMainModeHarness):
+    REGRESSION_CHANNEL_FIELDS = DetectMain.REGRESSION_CHANNEL_FIELDS
+    CHANNEL_COLORS = DetectMain.CHANNEL_COLORS
+    CALIBRATION_PLOT_PLACEHOLDER = DetectMain.CALIBRATION_PLOT_PLACEHOLDER
+    _regression_plot_data = DetectMain._regression_plot_data
+    _plot_regression_result = DetectMain._plot_regression_result
+    _show_calibration_plot_placeholder = (
+        DetectMain._show_calibration_plot_placeholder
+    )
+
+    def __init__(self):
+        super().__init__()
+        tab_widget = QTabWidget()
+        tab_page = QWidget()
+        tab_widget.addTab(tab_page, "Detection Image")
+        self.ui = SimpleNamespace(
+            pushButton_4=QPushButton("Linear Regression"),
+            pushButton_5=QPushButton("Import Image"),
+            pushButton_7=QPushButton("Plot"),
+            pushButton_8=QPushButton("Save"),
+            pushButton=QPushButton("Import Detection"),
+            labelOrigImg=QLabel("single preview"),
+            labelRecgImg=QLabel(),
+            label_4=QLabel("Table. Detection"),
+            tabviewOrig=QTableView(),
+            tabviewRecg=QTableView(),
+            tabWidget=tab_widget,
+            tab_3=tab_page,
+            progressBar=QProgressBar(),
+            lcdNumber=QLCDNumber(),
+        )
+        self.figure = Figure()
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        self._regression_suptitle = None
+        self._origPixmap = QPixmap(4, 4)
+        self._origPixmap.fill(QColor("red"))
+        self._recgPixmap = QPixmap(4, 4)
+        self._recgPixmap.fill(QColor("blue"))
+        self.ui.progressBar.setRange(7, 89)
+        self.ui.progressBar.setValue(37)
+        self.ui.lcdNumber.display(246)
+        self._set_active_worker_task(None)
+
+    def _scale_label(self, label):
+        pixmap = (
+            self._origPixmap
+            if label is self.ui.labelOrigImg
+            else self._recgPixmap
+        )
+        if pixmap is not None and not pixmap.isNull():
+            label.setPixmap(pixmap)
+
+
+def real_regression_payload(channel):
+    formulas = {
+        "R": {"slope": 2.0, "intercept": 0.5, "R2": 0.99},
+        "G": {"slope": 3.0, "intercept": 0.5, "R2": 0.98},
+        "B": {"slope": 4.0, "intercept": 0.5, "R2": 0.97},
+    }
+    return {
+        "samples": [
+            {
+                "Con.": 1.0,
+                "Red": 10.0,
+                "Green": 20.0,
+                "Blue": 30.0,
+                "included": True,
+            },
+            {
+                "Con.": 2.0,
+                "Red": 12.0,
+                "Green": 23.0,
+                "Blue": 34.0,
+                "included": True,
+            },
+        ],
+        "formulas": formulas,
+        "selected_channel": channel,
+    }
+
+
+def real_table_model(rows):
+    model = QStandardItemModel()
+    for row in rows:
+        model.appendRow([QStandardItem(str(value)) for value in row])
+    return model
+
+
+def model_cells(model):
+    return tuple(
+        tuple(model.item(row, column).text() for column in range(model.columnCount()))
+        for row in range(model.rowCount())
+    )
+
+
+def pixmap_pixel(pixmap):
+    return pixmap.toImage().pixelColor(0, 0).getRgb()
+
 
 class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
         cls.detectmain_tree = ast.parse(
             DETECTMAIN_SOURCE.read_text(encoding="utf-8"),
             filename=str(DETECTMAIN_SOURCE),
@@ -357,6 +558,15 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
         original_image = harness.origImg
         original_pixmap = harness._origPixmap
         original_label = harness.ui.labelOrigImg.text()
+        original_table = harness.ui.tabviewOrig.model()
+        original_detection_pixmap = harness._recgPixmap
+        original_detection_table = harness.ui.tabviewRecg.model()
+        original_progress = (
+            harness.ui.progressBar.minimum(),
+            harness.ui.progressBar.maximum(),
+            harness.ui.progressBar.value(),
+        )
+        original_elapsed = harness.ui.lcdNumber.value()
 
         returned = DetectMain.set_linear_mode(
             harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
@@ -381,10 +591,19 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
         self.assertFalse(harness.ui.pushButton_7.isEnabled())
         self.assertFalse(harness.ui.pushButton_8.isEnabled())
         self.assertTrue(harness.ui.pushButton.isEnabled())
+        self.assertIsNone(harness._recgPixmap)
+        self.assertEqual(harness.ui.tabviewRecg.model().rowCount(), 0)
+        self.assertEqual(harness.ui.tabWidget.tabText(0), "Linear Series Image")
+        self.assertEqual(harness.ui.label_4.text(), "Table. Linear Series")
 
         harness.origImg = "memory/series-preview.png"
         harness._origPixmap = FakePixmap("series")
         harness.ui.labelOrigImg.setText("series preview")
+        harness.ui.tabviewOrig.setModel(object())
+        harness._regression_plot_has_result = False
+        harness.ui.progressBar.setRange(0, 0)
+        harness.ui.progressBar.setValue(0)
+        harness.ui.lcdNumber.display(999)
         series_controller = harness._linear_series_controller
         returned = DetectMain.set_linear_mode(
             harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
@@ -403,11 +622,330 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
         self.assertEqual(harness.origImg, original_image)
         self.assertIs(harness._origPixmap, original_pixmap)
         self.assertEqual(harness.ui.labelOrigImg.text(), original_label)
+        self.assertIs(harness.ui.tabviewOrig.model(), original_table)
+        self.assertTrue(harness._regression_plot_has_result)
+        self.assertEqual(harness.plot_restore_calls, 1)
+        self.assertEqual((
+            harness.ui.progressBar.minimum(),
+            harness.ui.progressBar.maximum(),
+            harness.ui.progressBar.value(),
+        ), original_progress)
+        self.assertEqual(harness.ui.lcdNumber.value(), original_elapsed)
+        self.assertIs(harness._recgPixmap, original_detection_pixmap)
+        self.assertIs(harness.ui.tabviewRecg.model(), original_detection_table)
+        self.assertEqual(harness.ui.tabWidget.tabText(0), "Detection Image")
+        self.assertEqual(harness.ui.label_4.text(), "Table. Detection")
+        self.assertEqual(harness._last_completed_result_type, "linear")
+        self.assertTrue(harness._regression_dirty)
+        self.assertIs(harness._regression_result["formulas"], formulas)
+        self.assertEqual(harness.clear_active_formulas_requested.emissions, [])
+        self.assertEqual(harness.install_saved_formulas_requested.emissions, [])
+        self.assertEqual(harness.restore_active_formulas_requested.emissions, [])
         self.assertEqual(harness.ui.pushButton_4.text(), "Linear Regression")
         self.assertTrue(harness.ui.pushButton_4.isEnabled())
         self.assertTrue(harness.ui.pushButton_7.isEnabled())
         self.assertTrue(harness.ui.pushButton_8.isEnabled())
         self.assertTrue(harness.ui.pushButton.isEnabled())
+
+    def test_real_qt_plot_and_single_snapshot_survive_two_round_trips_per_channel(self):
+        for channel in ("R", "G", "B"):
+            with self.subTest(channel=channel):
+                harness = RealQtModeHarness()
+                payload = real_regression_payload(channel)
+                formulas = payload["formulas"]
+                table_model = real_table_model((
+                    ("1", "0", "10.00", "20.00", "30.00"),
+                    ("2", "1", "12.00", "23.00", "34.00"),
+                ))
+                detection_model = real_table_model((
+                    ("9", "0.5", "90.00", "91.00", "92.00"),
+                ))
+                source_image = np.full((3, 4, 3), 17, dtype=np.uint8)
+                harness._regression_result = payload
+                harness._linear_series_controller.remember_confirmed_result(payload)
+                harness._linear_series_selection_state = LinearSeriesState(
+                    last_confirmed_result=payload
+                )
+                harness._regression_dirty = True
+                harness._last_completed_result_type = "linear"
+                harness._calibration_source_path = "memory/{}.png".format(channel)
+                harness._calibration_source_image = source_image
+                harness._last_calibration_directory = "memory/{}".format(channel)
+                harness.origImg = source_image
+                harness.ui.tabviewOrig.setModel(table_model)
+                harness.ui.tabviewRecg.setModel(detection_model)
+                harness._detection_view_state = harness._capture_result_pane_view()
+                harness._regression_plot_has_result = False
+                harness._plot_regression_result()
+                harness._scale_label(harness.ui.labelOrigImg)
+                harness._scale_label(harness.ui.labelRecgImg)
+
+                formula = formulas[channel]
+                title = harness._regression_suptitle.get_text()
+                self.assertIn("{:.4f}".format(formula["slope"]), title)
+                self.assertIn("{:.4f}".format(formula["intercept"]), title)
+                self.assertIn("{:.4f}".format(formula["R2"]), title)
+                baseline_line = np.array(
+                    harness.ax.lines[0].get_xydata(), copy=True
+                )
+                baseline_scatter = np.array(
+                    harness.ax.collections[0].get_offsets(), copy=True
+                )
+                baseline_cells = model_cells(table_model)
+                baseline_orig_pixel = pixmap_pixel(harness._origPixmap)
+                baseline_label_pixel = pixmap_pixel(
+                    harness.ui.labelOrigImg.pixmap()
+                )
+                baseline_progress = (
+                    harness.ui.progressBar.minimum(),
+                    harness.ui.progressBar.maximum(),
+                    harness.ui.progressBar.value(),
+                )
+                baseline_elapsed = harness.ui.lcdNumber.value()
+                baseline_buttons = tuple(
+                    (button.text(), button.isEnabled())
+                    for button in (
+                        harness.ui.pushButton_4,
+                        harness.ui.pushButton_5,
+                        harness.ui.pushButton_7,
+                        harness.ui.pushButton_8,
+                        harness.ui.pushButton,
+                    )
+                )
+
+                for cycle in range(2):
+                    DetectMain.set_linear_mode(
+                        harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
+                    )
+                    harness.origImg = np.full(
+                        (3, 4, 3), cycle + 40, dtype=np.uint8
+                    )
+                    harness._origPixmap = QPixmap(4, 4)
+                    harness._origPixmap.fill(QColor("green"))
+                    harness.ui.labelOrigImg.setText("series {}".format(cycle))
+                    harness.ui.tabviewOrig.setModel(
+                        real_table_model((("series", cycle),))
+                    )
+                    harness.ui.progressBar.setRange(0, 0)
+                    harness.ui.progressBar.setValue(0)
+                    harness.ui.lcdNumber.display(999)
+
+                    DetectMain.set_linear_mode(
+                        harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
+                    )
+
+                    self.assertIs(harness._regression_result, payload)
+                    self.assertIs(harness._regression_result["formulas"], formulas)
+                    self.assertEqual(
+                        harness._regression_result["selected_channel"], channel
+                    )
+                    self.assertTrue(harness._regression_dirty)
+                    self.assertEqual(harness._last_completed_result_type, "linear")
+                    self.assertEqual(
+                        harness._calibration_source_path,
+                        "memory/{}.png".format(channel),
+                    )
+                    self.assertIs(harness._calibration_source_image, source_image)
+                    self.assertEqual(
+                        harness._last_calibration_directory,
+                        "memory/{}".format(channel),
+                    )
+                    self.assertIs(harness.origImg, source_image)
+                    self.assertIs(harness.ui.tabviewOrig.model(), table_model)
+                    self.assertEqual(model_cells(table_model), baseline_cells)
+                    self.assertEqual(
+                        pixmap_pixel(harness._origPixmap), baseline_orig_pixel
+                    )
+                    self.assertEqual(
+                        pixmap_pixel(harness.ui.labelOrigImg.pixmap()),
+                        baseline_label_pixel,
+                    )
+                    self.assertEqual(
+                        harness._regression_suptitle.get_text(), title
+                    )
+                    np.testing.assert_array_equal(
+                        harness.ax.lines[0].get_xydata(), baseline_line
+                    )
+                    np.testing.assert_array_equal(
+                        harness.ax.collections[0].get_offsets(),
+                        baseline_scatter,
+                    )
+                    self.assertEqual((
+                        harness.ui.progressBar.minimum(),
+                        harness.ui.progressBar.maximum(),
+                        harness.ui.progressBar.value(),
+                    ), baseline_progress)
+                    self.assertEqual(harness.ui.lcdNumber.value(), baseline_elapsed)
+                    self.assertEqual(tuple(
+                        (button.text(), button.isEnabled())
+                        for button in (
+                            harness.ui.pushButton_4,
+                            harness.ui.pushButton_5,
+                            harness.ui.pushButton_7,
+                            harness.ui.pushButton_8,
+                            harness.ui.pushButton,
+                        )
+                    ), baseline_buttons)
+
+    def test_real_qt_no_plot_snapshot_does_not_create_plot(self):
+        harness = RealQtModeHarness()
+        harness._show_calibration_plot_placeholder()
+        placeholder_text = tuple(text.get_text() for text in harness.ax.texts)
+        self.assertFalse(harness._regression_plot_has_result)
+        self.assertEqual(len(harness.ax.lines), 0)
+        self.assertEqual(len(harness.ax.collections), 0)
+        self.assertIsNone(harness._regression_suptitle)
+
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
+        )
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
+        )
+
+        self.assertFalse(harness._regression_plot_has_result)
+        self.assertEqual(len(harness.ax.lines), 0)
+        self.assertEqual(len(harness.ax.collections), 0)
+        self.assertIsNone(harness._regression_suptitle)
+        self.assertEqual(
+            tuple(text.get_text() for text in harness.ax.texts),
+            placeholder_text,
+        )
+
+    def test_real_qt_detection_completed_in_series_is_visible_on_return(self):
+        harness = RealQtModeHarness()
+        old_detection_result = harness._detection_result
+        old_detection_model = real_table_model((("old", "detection"),))
+        harness.ui.tabviewRecg.setModel(old_detection_model)
+        harness._detection_view_state = harness._capture_result_pane_view()
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
+        )
+        visible_series_model = harness.ui.tabviewRecg.model()
+        new_detection_result = {"detection": "new"}
+        new_detection_model = real_table_model((("new", "detection"),))
+        new_detection_pixmap = QPixmap(4, 4)
+        new_detection_pixmap.fill(QColor("green"))
+        harness._detection_result = new_detection_result
+        harness._detection_dirty = True
+        harness._last_completed_result_type = "detection"
+
+        harness._publish_detection_result_view(
+            new_detection_pixmap, new_detection_model
+        )
+
+        self.assertIsNot(harness._detection_result, old_detection_result)
+        self.assertIs(harness.ui.tabviewRecg.model(), visible_series_model)
+        self.assertIsNone(harness._recgPixmap)
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
+        )
+        self.assertIs(harness._detection_result, new_detection_result)
+        self.assertIs(harness.ui.tabviewRecg.model(), new_detection_model)
+        self.assertEqual(
+            model_cells(harness.ui.tabviewRecg.model()),
+            (("new", "detection"),),
+        )
+        self.assertEqual(pixmap_pixel(harness._recgPixmap), (0, 128, 0, 255))
+        self.assertEqual(
+            pixmap_pixel(harness.ui.labelRecgImg.pixmap()),
+            (0, 128, 0, 255),
+        )
+        self.assertEqual(harness._last_completed_result_type, "detection")
+
+    def test_series_mode_keeps_new_detection_view_hidden_until_single_returns(self):
+        harness = DetectMainModeHarness()
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
+        )
+        visible_series_model = harness.ui.tabviewRecg.model()
+        new_pixmap = FakePixmap("new detection")
+        new_model = object()
+        new_result = {"detection": "new"}
+        harness._detection_result = new_result
+        harness._detection_dirty = True
+        harness._last_completed_result_type = "detection"
+
+        harness._publish_detection_result_view(new_pixmap, new_model)
+
+        self.assertIsNone(harness._recgPixmap)
+        self.assertIs(harness.ui.tabviewRecg.model(), visible_series_model)
+        self.assertEqual(harness.ui.tabWidget.tabText(0), "Linear Series Image")
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
+        )
+        self.assertIs(harness._detection_result, new_result)
+        self.assertIs(harness._recgPixmap, new_pixmap)
+        self.assertIs(harness.ui.tabviewRecg.model(), new_model)
+        self.assertEqual(harness._last_completed_result_type, "detection")
+
+    def test_detection_completion_in_series_updates_only_hidden_detection_view(self):
+        from tests.test_batch_detection_flow import (
+            DetectionHandlerHarness,
+            runtime_payload,
+        )
+
+        harness = DetectionHandlerHarness()
+        harness._linear_mode = detectmain_module.LINEAR_MODE_IMAGE_SERIES
+        harness._detection_view_state = None
+        visible_pixmap = FakePixmap("series result")
+        visible_model = object()
+        harness._recgPixmap = visible_pixmap
+        harness.ui.tabviewRecg.setModel(visible_model)
+        harness._batch_controller.set_options("entire_batch", "per_image")
+        harness._batch_controller.replace_images(["memory/detection.png"])
+        harness._active_worker_task = "detection"
+        task = harness._batch_controller.begin()
+
+        DetectMain._on_detection_finished(harness, runtime_payload(task))
+
+        self.assertIs(harness._recgPixmap, visible_pixmap)
+        self.assertIs(harness.ui.tabviewRecg.model(), visible_model)
+        self.assertIsNotNone(harness._detection_view_state)
+        self.assertIsNot(
+            harness._detection_view_state.pixmap, visible_pixmap
+        )
+        self.assertEqual(harness._detection_view_state.model[1][0][0], 1)
+        self.assertEqual(harness._detection_view_state.model[1][0][1], 0.5)
+        self.assertEqual(
+            harness._detection_view_state.tab_text, "Detection Image"
+        )
+        self.assertEqual(harness._last_completed_result_type, "detection")
+        self.assertTrue(harness._detection_dirty)
+
+    def test_single_round_trip_preserves_each_regression_channel(self):
+        for channel in ("R", "G", "B"):
+            with self.subTest(channel=channel):
+                harness = DetectMainModeHarness()
+                harness._regression_result["selected_channel"] = channel
+                result = harness._regression_result
+
+                DetectMain.set_linear_mode(
+                    harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
+                )
+                DetectMain.set_linear_mode(
+                    harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
+                )
+
+                self.assertIs(harness._regression_result, result)
+                self.assertEqual(
+                    harness._regression_result["selected_channel"], channel
+                )
+
+    def test_round_trip_without_plot_restores_placeholder_state(self):
+        harness = DetectMainModeHarness()
+        harness._regression_plot_has_result = False
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_IMAGE_SERIES
+        )
+        harness._regression_plot_has_result = True
+
+        DetectMain.set_linear_mode(
+            harness, detectmain_module.LINEAR_MODE_SINGLE_IMAGE
+        )
+
+        self.assertFalse(harness._regression_plot_has_result)
+        self.assertEqual(harness.plot_restore_calls, 0)
 
     def test_detect_main_mode_failure_rolls_back_all_runtime_and_controls(self):
         harness = DetectMainModeHarness()
@@ -426,6 +964,10 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
             harness.origImg,
             harness._origPixmap,
             harness.ui.labelOrigImg.text(),
+            harness._recgPixmap,
+            harness.ui.tabviewRecg.model(),
+            harness.ui.tabWidget.tabText(0),
+            harness.ui.label_4.text(),
             harness._linear_series_weight_path,
         )
         controls = tuple(
@@ -460,6 +1002,10 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
             harness.origImg,
             harness._origPixmap,
             harness.ui.labelOrigImg.text(),
+            harness._recgPixmap,
+            harness.ui.tabviewRecg.model(),
+            harness.ui.tabWidget.tabText(0),
+            harness.ui.label_4.text(),
             harness._linear_series_weight_path,
         ), runtime_snapshot)
         self.assertEqual(tuple(

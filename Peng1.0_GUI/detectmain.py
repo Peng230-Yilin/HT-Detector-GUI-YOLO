@@ -40,7 +40,11 @@ from yolo_detection_worker import YoloDetectionWorker
 from batch_detection_controller import BatchDetectionController
 from batch_state import DetectionScope, ImageStatus, NumberingMode
 from linear_series_controller import LinearSeriesController
-from linear_series_state import LinearSeriesPhase, LinearSeriesState
+from linear_series_state import (
+    LinearImageStatus,
+    LinearSeriesPhase,
+    LinearSeriesState,
+)
 
 
 _USE_CURRENT_RESULT = object()
@@ -90,6 +94,34 @@ class _SaveTransactionResult:
     rollback_errors: tuple = ()
 
 
+@dataclass(frozen=True)
+class _ResultPaneViewState:
+    pixmap: object
+    label_text: str
+    model: object
+    tab_text: str
+    table_label_text: str
+
+
+@dataclass(frozen=True)
+class _SingleLinearViewState:
+    orig_img: object
+    pixmap: object
+    label_text: str
+    table_model: object
+    regression_result: object
+    regression_dirty: bool
+    last_completed_result_type: object
+    detection_result: object
+    regression_plot_has_result: bool
+    calibration_source_path: object
+    calibration_source_image: object
+    last_calibration_directory: object
+    progress_range: tuple
+    progress_value: int
+    elapsed_value: object
+
+
 class DetectMain(QWidget):
     detection_requested = Signal(str, str, object)
     regression_requested = Signal(str, str)
@@ -115,6 +147,8 @@ class DetectMain(QWidget):
         self._linear_mode = LINEAR_MODE_SINGLE_IMAGE
         self._single_linear_action_text = self.ui.pushButton_4.text()
         self._single_linear_view_state = None
+        self._detection_view_state = None
+        self._linear_series_result_view_state = None
         self._linear_series_controller = LinearSeriesController(
             LinearSeriesState(last_confirmed_result=None)
         )
@@ -311,6 +345,7 @@ class DetectMain(QWidget):
             # even when DetectMain itself isn't in a layout (the UI widget is).
             lbl.installEventFilter(self)
         self._update_image_scales()
+        self._detection_view_state = self._capture_result_pane_view()
 
         self.ui.progressBar.setValue(100)
         try:
@@ -465,14 +500,18 @@ class DetectMain(QWidget):
         self._detection_dirty = False
         if self._last_completed_result_type == "detection":
             self._last_completed_result_type = None
-        self._recgPixmap = None
-        self.ui.labelRecgImg.clear()
-        self._populate_tableview(
-            self.ui.tabviewRecg, ["No.", "Con.", "Red", "Green", "Blue"], []
+        headers = ["No.", "Con.", "Red", "Green", "Blue"]
+        model = self._build_table_model(headers, [])
+        DetectMain._publish_detection_result_view(
+            self, None, model
         )
-        self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            == LINEAR_MODE_SINGLE_IMAGE
+        ):
+            self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
+                QHeaderView.Stretch
+            )
         self._update_save_button()
 
     @staticmethod
@@ -1374,24 +1413,170 @@ class DetectMain(QWidget):
         )
 
     def _capture_single_linear_view(self):
-        return (
-            self.origImg,
-            self._origPixmap,
-            self.ui.labelOrigImg.text(),
+        return _SingleLinearViewState(
+            orig_img=self.origImg,
+            pixmap=self._origPixmap,
+            label_text=self.ui.labelOrigImg.text(),
+            table_model=self.ui.tabviewOrig.model(),
+            regression_result=self._regression_result,
+            regression_dirty=self._regression_dirty,
+            last_completed_result_type=self._last_completed_result_type,
+            detection_result=self._detection_result,
+            regression_plot_has_result=self._regression_plot_has_result,
+            calibration_source_path=self._calibration_source_path,
+            calibration_source_image=self._calibration_source_image,
+            last_calibration_directory=self._last_calibration_directory,
+            progress_range=(
+                self.ui.progressBar.minimum(),
+                self.ui.progressBar.maximum(),
+            ),
+            progress_value=self.ui.progressBar.value(),
+            elapsed_value=self.ui.lcdNumber.value(),
         )
 
     def _restore_single_linear_view(self, view_state=None):
         state = self._single_linear_view_state if view_state is None else view_state
         if state is None:
             return
-        self.origImg, self._origPixmap, label_text = state
-        self.ui.labelOrigImg.setText(label_text)
+        detection_changed = self._detection_result is not state.detection_result
+        self.origImg = state.orig_img
+        self._origPixmap = state.pixmap
+        self._regression_result = state.regression_result
+        self._regression_dirty = state.regression_dirty
+        if not detection_changed:
+            self._last_completed_result_type = state.last_completed_result_type
+        self._calibration_source_path = state.calibration_source_path
+        self._calibration_source_image = state.calibration_source_image
+        self._last_calibration_directory = state.last_calibration_directory
+        self.ui.labelOrigImg.setText(state.label_text)
         if self._origPixmap is not None and not self._origPixmap.isNull():
             self._scale_label(self.ui.labelOrigImg)
-        elif label_text:
-            self.ui.labelOrigImg.setText(label_text)
+        elif state.label_text:
+            self.ui.labelOrigImg.setText(state.label_text)
         else:
             self.ui.labelOrigImg.clear()
+        self.ui.tabviewOrig.setModel(state.table_model)
+        if state.regression_plot_has_result != self._regression_plot_has_result:
+            if state.regression_plot_has_result:
+                self._plot_regression_result()
+            else:
+                self._show_calibration_plot_placeholder()
+        self.ui.progressBar.setRange(*state.progress_range)
+        self.ui.progressBar.setValue(state.progress_value)
+        self.ui.lcdNumber.display(state.elapsed_value)
+
+    def _capture_result_pane_view(self):
+        label = getattr(self.ui, "labelRecgImg", None)
+        table = getattr(self.ui, "tabviewRecg", None)
+        tab_widget = getattr(self.ui, "tabWidget", None)
+        tab_page = getattr(self.ui, "tab_3", None)
+        table_label = getattr(self.ui, "label_4", None)
+        tab_text = "Detection Image"
+        if tab_widget is not None and tab_page is not None:
+            tab_text = tab_widget.tabText(tab_widget.indexOf(tab_page))
+        return _ResultPaneViewState(
+            pixmap=getattr(self, "_recgPixmap", None),
+            label_text=label.text() if label is not None else "",
+            model=table.model() if table is not None else None,
+            tab_text=tab_text,
+            table_label_text=(
+                table_label.text() if table_label is not None
+                else "Table. Detection"
+            ),
+        )
+
+    def _apply_result_pane_view(self, view_state):
+        self._recgPixmap = view_state.pixmap
+        label = getattr(self.ui, "labelRecgImg", None)
+        if label is not None:
+            label.clear()
+            if view_state.label_text:
+                label.setText(view_state.label_text)
+        table = getattr(self.ui, "tabviewRecg", None)
+        if table is not None:
+            table.setModel(view_state.model)
+        tab_widget = getattr(self.ui, "tabWidget", None)
+        tab_page = getattr(self.ui, "tab_3", None)
+        if tab_widget is not None and tab_page is not None:
+            tab_widget.setTabText(
+                tab_widget.indexOf(tab_page), view_state.tab_text
+            )
+        table_label = getattr(self.ui, "label_4", None)
+        if table_label is not None:
+            table_label.setText(view_state.table_label_text)
+        if (
+            label is not None
+            and self._recgPixmap is not None
+            and not self._recgPixmap.isNull()
+        ):
+            self._scale_label(label)
+
+    def _empty_linear_series_result_view(self):
+        model = self._build_table_model(
+            DetectMain.CALIBRATION_TABLE_HEADERS, []
+        )
+        return _ResultPaneViewState(
+            pixmap=None,
+            label_text="No successful Linear Series image yet.",
+            model=model,
+            tab_text="Linear Series Image",
+            table_label_text="Table. Linear Series",
+        )
+
+    def _publish_detection_result_view(self, pixmap, model, label_text=""):
+        view_state = _ResultPaneViewState(
+            pixmap=pixmap,
+            label_text=label_text,
+            model=model,
+            tab_text="Detection Image",
+            table_label_text="Table. Detection",
+        )
+        self._detection_view_state = view_state
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            == LINEAR_MODE_SINGLE_IMAGE
+        ):
+            DetectMain._apply_result_pane_view(self, view_state)
+
+    def _publish_linear_series_result_view(self, image_order, pixmap):
+        try:
+            image = self._linear_series_controller.state.images[image_order - 1]
+        except (AttributeError, IndexError, TypeError):
+            return False
+        if (
+            image.image_order != image_order
+            or image.status is not LinearImageStatus.COMPLETED
+            or not image.samples
+        ):
+            return False
+        rows = [
+            (
+                sample.series_number,
+                "",
+                sample.red,
+                sample.green,
+                sample.blue,
+            )
+            for sample in image.samples
+        ]
+        model = self._build_table_model(
+            DetectMain.CALIBRATION_TABLE_HEADERS, rows
+        )
+        view_state = _ResultPaneViewState(
+            pixmap=pixmap,
+            label_text="",
+            model=model,
+            tab_text="Linear Series Image - {}".format(
+                image.original_file_name
+            ),
+            table_label_text="Table. Linear Series - {}".format(
+                image.original_file_name
+            ),
+        )
+        self._linear_series_result_view_state = view_state
+        if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
+            DetectMain._apply_result_pane_view(self, view_state)
+        return True
 
     def _apply_linear_mode_controls(self):
         if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
@@ -1412,6 +1597,9 @@ class DetectMain(QWidget):
         previous_weight_path = self._linear_series_weight_path
         previous_single_view = self._single_linear_view_state
         previous_display = self._capture_single_linear_view()
+        previous_result_display = self._capture_result_pane_view()
+        previous_detection_view = self._detection_view_state
+        previous_series_view = self._linear_series_result_view_state
         control_snapshot = tuple(
             (button.text(), button.isEnabled())
             for button in (
@@ -1438,10 +1626,23 @@ class DetectMain(QWidget):
                 and previous_mode == LINEAR_MODE_SINGLE_IMAGE
             ):
                 self._single_linear_view_state = previous_display
+                self._detection_view_state = previous_result_display
+                self._linear_series_result_view_state = (
+                    self._empty_linear_series_result_view()
+                )
             self._linear_mode = mode
+            if (
+                mode == LINEAR_MODE_IMAGE_SERIES
+                and previous_mode == LINEAR_MODE_SINGLE_IMAGE
+            ):
+                self._apply_result_pane_view(
+                    self._linear_series_result_view_state
+                )
             if empty_selection is not None:
                 self._linear_series_weight_path = None
                 self._restore_single_linear_view(previous_single_view)
+                if self._detection_view_state is not None:
+                    self._apply_result_pane_view(self._detection_view_state)
             self._apply_linear_mode_controls()
         except Exception:
             self._linear_mode = previous_mode
@@ -1449,14 +1650,21 @@ class DetectMain(QWidget):
             self._linear_series_selection_state = previous_selection
             self._linear_series_weight_path = previous_weight_path
             self._single_linear_view_state = previous_single_view
+            self._detection_view_state = previous_detection_view
+            self._linear_series_result_view_state = previous_series_view
             try:
                 self._restore_single_linear_view(previous_display)
             except Exception:
-                self.origImg, self._origPixmap, label_text = previous_display
+                self.origImg = previous_display.orig_img
+                self._origPixmap = previous_display.pixmap
                 try:
-                    self.ui.labelOrigImg.setText(label_text)
+                    self.ui.labelOrigImg.setText(previous_display.label_text)
                 except Exception:
                     pass
+            try:
+                self._apply_result_pane_view(previous_result_display)
+            except Exception:
+                self._recgPixmap = previous_result_display.pixmap
             for button, (text, enabled) in zip((
                 self.ui.pushButton_4,
                 self.ui.pushButton_5,
@@ -1472,6 +1680,7 @@ class DetectMain(QWidget):
             previous_controller.cancel()
             self._linear_series_selection_state = empty_selection
             self._single_linear_view_state = None
+            self._linear_series_result_view_state = None
         return self._linear_mode
 
     apply_linear_mode = set_linear_mode
@@ -1499,6 +1708,12 @@ class DetectMain(QWidget):
             self._origPixmap = QPixmap()
             self.ui.labelOrigImg.clear()
             self.ui.labelOrigImg.setText("Import images for a Linear series")
+            self._linear_series_result_view_state = (
+                self._empty_linear_series_result_view()
+            )
+            self._apply_result_pane_view(
+                self._linear_series_result_view_state
+            )
             self._apply_linear_mode_controls()
         return True
 
@@ -1643,6 +1858,8 @@ class DetectMain(QWidget):
         )
         previous_selection = self._linear_series_selection_state
         previous_weight_path = self._linear_series_weight_path
+        previous_result_display = self._capture_result_pane_view()
+        previous_series_view = self._linear_series_result_view_state
         control_snapshot = tuple(
             (button.text(), button.isEnabled())
             for button in (
@@ -1660,12 +1877,19 @@ class DetectMain(QWidget):
             self._scale_label(self.ui.labelOrigImg)
             self._linear_series_selection_state = candidate_state
             self._linear_series_weight_path = None
+            self._linear_series_result_view_state = (
+                self._empty_linear_series_result_view()
+            )
+            self._apply_result_pane_view(
+                self._linear_series_result_view_state
+            )
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
             self._apply_linear_mode_controls()
         except Exception as error:
             self._linear_series_selection_state = previous_selection
             self._linear_series_weight_path = previous_weight_path
+            self._linear_series_result_view_state = previous_series_view
             self.origImg = previous_orig_img
             self._origPixmap = previous_pixmap
             self.ui.labelOrigImg.setText(previous_label_text)
@@ -1678,6 +1902,10 @@ class DetectMain(QWidget):
                 previous_progress[0], previous_progress[1]
             )
             self.ui.progressBar.setValue(previous_progress[2])
+            try:
+                self._apply_result_pane_view(previous_result_display)
+            except Exception:
+                self._recgPixmap = previous_result_display.pixmap
             for button, (text, enabled) in zip((
                 self.ui.pushButton_4,
                 self.ui.pushButton_5,
@@ -1764,12 +1992,25 @@ class DetectMain(QWidget):
         self._linear_series_ui_warnings = []
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(0)
+        previous_result_display = self._capture_result_pane_view()
+        previous_series_view = self._linear_series_result_view_state
         try:
+            self._linear_series_result_view_state = (
+                self._empty_linear_series_result_view()
+            )
+            self._apply_result_pane_view(
+                self._linear_series_result_view_state
+            )
             self._set_active_worker_task("linear_series")
             self._dispatch_linear_series_task(task)
         except Exception as error:
             self._linear_series_controller.cancel()
             self._linear_series_weight_path = None
+            self._linear_series_result_view_state = previous_series_view
+            try:
+                self._apply_result_pane_view(previous_result_display)
+            except Exception:
+                self._recgPixmap = previous_result_display.pixmap
             self._set_active_worker_task(None)
             self._show_message_safely(
                 QMessageBox.critical,
@@ -1872,6 +2113,9 @@ class DetectMain(QWidget):
         self._linear_series_ui_warnings.append(warning)
 
     def _abort_linear_series_after_worker_return(self, error):
+        if self._close_wait_pending or self._shutdown_requested:
+            self._cancel_linear_series_after_worker_return()
+            return
         try:
             self._linear_series_controller.cancel()
         except Exception as cancel_error:
@@ -1901,16 +2145,18 @@ class DetectMain(QWidget):
         )
         self._set_active_worker_task(None)
 
-    def _after_linear_series_task_accepted(self, preview_pixmap=None):
+    def _after_linear_series_task_accepted(
+        self, preview_pixmap=None, image_order=None
+    ):
         if self._close_wait_pending or self._shutdown_requested:
             self._cancel_linear_series_after_worker_return()
             return
 
-        if preview_pixmap is not None:
+        if preview_pixmap is not None and image_order is not None:
             try:
-                self._origPixmap = preview_pixmap
-                self.ui.labelOrigImg.setText("")
-                self._scale_label(self.ui.labelOrigImg)
+                self._publish_linear_series_result_view(
+                    image_order, preview_pixmap
+                )
             except Exception as error:
                 self._record_linear_series_ui_warning("preview update", error)
         try:
@@ -1932,6 +2178,9 @@ class DetectMain(QWidget):
         task = self._linear_series_controller.active_job
         if task is None:
             return
+        if self._close_wait_pending or self._shutdown_requested:
+            self._cancel_linear_series_after_worker_return()
+            return
 
         preview_pixmap = None
         try:
@@ -1947,7 +2196,9 @@ class DetectMain(QWidget):
                 "The Linear series result and fallback failure were rejected."
             )
             return
-        self._after_linear_series_task_accepted(preview_pixmap)
+        self._after_linear_series_task_accepted(
+            preview_pixmap, task.image_order
+        )
 
     @Slot(object)
     def _on_linear_series_extraction_failed(self, payload):
@@ -1955,6 +2206,9 @@ class DetectMain(QWidget):
             return
         task = self._linear_series_controller.active_job
         if task is None:
+            return
+        if self._close_wait_pending or self._shutdown_requested:
+            self._cancel_linear_series_after_worker_return()
             return
         try:
             accepted = self._linear_series_controller.accept_failure(payload)
@@ -2008,38 +2262,74 @@ class DetectMain(QWidget):
             return
 
         try:
+            if self._close_wait_pending or self._shutdown_requested:
+                return
             try:
                 self.ui.progressBar.setRange(0, 100)
                 self.ui.progressBar.setValue(100)
             except Exception as error:
                 self._record_linear_series_ui_warning("final progress update", error)
-            message = (
-                "Linear series extraction {}.\n"
-                "Total images: {total_images}\n"
-                "Successful images: {successful_images}\n"
-                "Failed images: {failed_images}\n"
-                "Valid samples: {valid_samples}\n"
-                "Sample errors: {sample_errors}"
-            ).format(
-                "completed" if phase == LinearSeriesPhase.MAPPING else "failed",
-                **summary
-            )
-            warnings = tuple(self._linear_series_ui_warnings)
-            if warnings:
-                message += "\nUI warnings: {}\n{}".format(
-                    len(warnings), "\n".join(warnings)
+
+            def public_summary_message():
+                message = (
+                    "Linear series extraction {}.\n"
+                    "Total images: {total_images}\n"
+                    "Successful images: {successful_images}\n"
+                    "Failed images: {failed_images}\n"
+                    "Valid samples: {valid_samples}\n"
+                    "Sample errors: {sample_errors}"
+                ).format(
+                    (
+                        "completed"
+                        if phase == LinearSeriesPhase.MAPPING
+                        else "failed"
+                    ),
+                    **summary
                 )
+                warnings = tuple(self._linear_series_ui_warnings)
+                if warnings:
+                    warning_counts = {}
+                    for warning in warnings:
+                        warning_counts[warning] = warning_counts.get(warning, 0) + 1
+                    public_warnings = [
+                        (
+                            "{} ({} occurrences)".format(warning, count)
+                            if count > 1
+                            else warning
+                        )
+                        for warning, count in warning_counts.items()
+                    ]
+                    message += "\nUI warnings: {}\n{}".format(
+                        len(warnings), "\n".join(public_warnings)
+                    )
+                return message
+
+            message = public_summary_message()
             try:
                 self.detection_status_changed.emit(message.replace("\n", " | "))
             except Exception as error:
                 self._record_linear_series_ui_warning("final status update", error)
+                message = public_summary_message()
+            has_warnings = bool(self._linear_series_ui_warnings)
             if phase == LinearSeriesPhase.FAILED:
-                self._show_message_safely(
-                    QMessageBox.critical,
-                    self,
-                    "Linear series extraction failed",
-                    message,
-                )
+                message_function = QMessageBox.critical
+                title = "Linear series extraction failed"
+            elif (
+                summary["failed_images"]
+                or summary["sample_errors"]
+                or has_warnings
+            ):
+                message_function = QMessageBox.warning
+                title = "Linear series extraction partially completed"
+            else:
+                message_function = QMessageBox.information
+                title = "Linear series extraction completed"
+            self._show_message_safely(
+                message_function,
+                self,
+                title,
+                message,
+            )
         finally:
             self._linear_series_weight_path = None
             self._set_active_worker_task(None)
@@ -2292,13 +2582,17 @@ class DetectMain(QWidget):
             accepted = True
             current_image = self.batch_state.current_image
             if current_image.status == ImageStatus.COMPLETED:
-                self._recgPixmap = pixmap
-                self._scale_label(self.ui.labelRecgImg)
-                self.ui.tabviewRecg.setModel(model)
-                self.ui.tabviewRecg.verticalHeader().hide()
-                self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
-                    QHeaderView.Stretch
+                DetectMain._publish_detection_result_view(
+                    self, pixmap, model
                 )
+                if (
+                    getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+                    == LINEAR_MODE_SINGLE_IMAGE
+                ):
+                    self.ui.tabviewRecg.verticalHeader().hide()
+                    self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
+                        QHeaderView.Stretch
+                    )
                 self._detection_result = runtime_payload
                 self._detection_dirty = True
                 self._last_completed_result_type = "detection"

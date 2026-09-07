@@ -99,6 +99,7 @@ def series_settings():
         "x1_ratio": 0.8,
         "y1_ratio": 0.8,
         "rgb_calculate_accuracy": 3,
+        "rgb_display_accuracy": 2,
     }
 
 
@@ -520,7 +521,7 @@ class LinearSeriesWorkerPayloadTests(unittest.TestCase):
         forbidden = {
             "con_list", "linear_formula_point_matrix", "color_channel",
             "Order_Con_R_G_B", "con_display_accuracy",
-            "rgb_display_accuracy", "detection_scope", "numbering_mode",
+            "detection_scope", "numbering_mode",
         }
         guard = GuardSettings({**allowed, **{key: object() for key in forbidden}},
                               forbidden)
@@ -587,6 +588,119 @@ class LinearSeriesWorkerPayloadTests(unittest.TestCase):
         self.assertIn("Sample 1", texts)
         self.assertFalse(any(text.startswith("No.") for text in texts))
         self.assertFalse(any(text.startswith("Con.") for text in texts))
+
+    def test_rgb_display_decimals_only_change_fixed_width_annotation_text(self):
+        raw_rgb = (202.5151, 7.0, 9.8754)
+        expected_text = {
+            0: ("R:203", "G:7", "B:10"),
+            2: ("R:202.52", "G:7.00", "B:9.88"),
+            3: ("R:202.515", "G:7.000", "B:9.875"),
+        }
+        observed_samples = []
+
+        for decimals in (0, 2, 3):
+            settings = series_settings()
+            settings["rgb_display_accuracy"] = decimals
+            with patch.object(
+                worker_module,
+                "_calculate_rgb_averages",
+                return_value=raw_rgb,
+            ), patch.object(cv2, "putText", wraps=cv2.putText) as put_text:
+                payload = self.build(SINGLE_RECORDS, settings_value=settings)
+
+            texts = [call.args[1] for call in put_text.call_args_list]
+            for text in expected_text[decimals]:
+                self.assertIn(text, texts)
+            observed_samples.append(payload["samples"])
+
+        self.assertEqual(observed_samples[0], observed_samples[1])
+        self.assertEqual(observed_samples[1], observed_samples[2])
+        self.assertEqual(
+            tuple(observed_samples[0][0][channel] for channel in (
+                "red", "green", "blue",
+            )),
+            raw_rgb,
+        )
+
+    def test_rgb_display_decimals_do_not_change_state_or_regression_input(self):
+        records = paired_records(
+            [(10, 10, 50, 90), (120, 10, 160, 90)],
+            [(15, 30, 45, 80), (125, 30, 155, 80)],
+        )
+        raw_rgb = (
+            (202.5151, 7.0, 9.8754),
+            (101.1255, 8.25, 10.5),
+        )
+        expected_text = {
+            0: ("R:203", "G:7", "B:10"),
+            2: ("R:202.52", "G:7.00", "B:9.88"),
+            3: ("R:202.515", "G:7.000", "B:9.875"),
+        }
+        observed_payloads = []
+        observed_states = []
+        observed_regressions = []
+
+        for decimals in (0, 2, 3):
+            controller = LinearSeriesController()
+            task = controller.begin(["virtual/regression-display.png"])
+            settings = series_settings()
+            settings["rgb_display_accuracy"] = decimals
+            worker = YoloDetectionWorker()
+            with patch.object(
+                worker_module,
+                "_calculate_rgb_averages",
+                side_effect=raw_rgb,
+            ), patch.object(cv2, "putText", wraps=cv2.putText) as put_text:
+                completed, failures, _ = self.invoke(
+                    worker,
+                    FakeResult(records),
+                    context=task.context(),
+                    settings_value=settings,
+                )
+
+            self.assertEqual(failures, [])
+            self.assertEqual(len(completed), 1)
+            payload = completed[0]
+            texts = [call.args[1] for call in put_text.call_args_list]
+            for text in expected_text[decimals]:
+                self.assertIn(text, texts)
+
+            payload_rgb = tuple(
+                tuple(sample[channel] for channel in ("red", "green", "blue"))
+                for sample in payload["samples"]
+            )
+            self.assertEqual(payload_rgb, raw_rgb)
+            self.assertTrue(controller.accept_success(payload))
+            self.assertIsNotNone(controller.finish_if_done())
+
+            state = controller.state
+            state_rgb = tuple(
+                (sample.red, sample.green, sample.blue)
+                for sample in state.all_samples
+            )
+            self.assertEqual(state_rgb, raw_rgb)
+            for concentration, sample in enumerate(state.all_samples):
+                state.set_included(sample.sample_key, True)
+                state.set_concentration(sample.sample_key, str(concentration))
+            regression = state.build_regression_input()
+            regression_rgb = tuple(zip(
+                regression.red_values,
+                regression.green_values,
+                regression.blue_values,
+            ))
+            self.assertEqual(regression_rgb, raw_rgb)
+            observed_payloads.append({
+                key: value for key, value in payload.items() if key != "image"
+            })
+            observed_states.append((state.phase, state.images))
+            observed_regressions.append(regression)
+
+        self.assertEqual(observed_payloads[0], observed_payloads[1])
+        self.assertEqual(observed_payloads[1], observed_payloads[2])
+        self.assertEqual(observed_states[0], observed_states[1])
+        self.assertEqual(observed_states[1], observed_states[2])
+        self.assertEqual(observed_regressions[0], observed_regressions[1])
+        self.assertEqual(observed_regressions[1], observed_regressions[2])
 
     def test_worker_payload_is_accepted_by_controller(self):
         controller = LinearSeriesController()

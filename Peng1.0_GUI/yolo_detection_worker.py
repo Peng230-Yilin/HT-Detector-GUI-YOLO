@@ -32,6 +32,7 @@ _LINEAR_SERIES_SETTING_FIELDS = (
     "x1_ratio",
     "y1_ratio",
     "rgb_calculate_accuracy",
+    "rgb_display_accuracy",
 )
 
 
@@ -622,11 +623,21 @@ class YoloDetectionWorker(QObject):
                     (250, 240, 10),
                     2,
                 )
+                display_decimals = settings["rgb_display_accuracy"]
                 text_lines = (
                     ("Sample {}".format(spatial_order), (255, 0, 255)),
-                    ("R:{}".format(sample["red"]), (0, 0, 255)),
-                    ("G:{}".format(sample["green"]), (0, 255, 0)),
-                    ("B:{}".format(sample["blue"]), (255, 0, 0)),
+                    (
+                        "R:{}".format(format(sample["red"], ".{}f".format(display_decimals))),
+                        (0, 0, 255),
+                    ),
+                    (
+                        "G:{}".format(format(sample["green"], ".{}f".format(display_decimals))),
+                        (0, 255, 0),
+                    ),
+                    (
+                        "B:{}".format(format(sample["blue"], ".{}f".format(display_decimals))),
+                        (255, 0, 0),
+                    ),
                 )
                 layout = _text_layout(
                     cv2,
