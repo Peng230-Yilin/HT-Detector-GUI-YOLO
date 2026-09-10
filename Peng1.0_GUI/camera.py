@@ -21,6 +21,7 @@ from ui.ui_camera import Ui_Camera
 
 class Camera(QWidget):
     shutdown_ready = Signal()
+    camera_state_changed = Signal(str)
 
     STATE_OFF = "OFF"
     STATE_STARTING = "STARTING"
@@ -113,6 +114,7 @@ class Camera(QWidget):
         self._ui.captureWidget.setToolTip(tooltip)
 
     def _set_camera_state(self, state):
+        state_changed = state != self._camera_state
         self._camera_state = state
         button_text = {
             self.STATE_OFF: "Start Camera",
@@ -131,22 +133,32 @@ class Camera(QWidget):
 
         if state == self.STATE_ON:
             self._ui.stackedWidget.setCurrentWidget(self._ui.viewfinderPage)
-            return
+        else:
+            messages = {
+                self.STATE_OFF: "Camera is off.\n摄像头已关闭。",
+                self.STATE_STARTING: "Starting camera...\n正在启动摄像头……",
+                self.STATE_STOPPING: "Stopping camera...\n正在关闭摄像头……",
+                self.STATE_DISABLED: (
+                    "Camera is available only in the main window.\n"
+                    "摄像头仅在主窗口中可用。"
+                ),
+                self.STATE_SHUTTING_DOWN: (
+                    "Shutting down camera...\n正在关闭摄像头……"
+                ),
+            }
+            self._camera_status_message.setText(messages[state])
+            self._ui.stackedWidget.setCurrentIndex(self._status_page_index)
 
-        messages = {
-            self.STATE_OFF: "Camera is off.\n摄像头已关闭。",
-            self.STATE_STARTING: "Starting camera...\n正在启动摄像头……",
-            self.STATE_STOPPING: "Stopping camera...\n正在关闭摄像头……",
-            self.STATE_DISABLED: (
-                "Camera is available only in the main window.\n"
-                "摄像头仅在主窗口中可用。"
-            ),
-            self.STATE_SHUTTING_DOWN: (
-                "Shutting down camera...\n正在关闭摄像头……"
-            ),
-        }
-        self._camera_status_message.setText(messages[state])
-        self._ui.stackedWidget.setCurrentIndex(self._status_page_index)
+        if state_changed:
+            self.camera_state_changed.emit(state)
+
+    @property
+    def camera_state(self):
+        return self._camera_state
+
+    @Slot(bool)
+    def set_camera_toggle_visible(self, visible):
+        self._camera_toggle_button.setVisible(bool(visible))
 
     @Slot()
     def _toggle_camera(self):

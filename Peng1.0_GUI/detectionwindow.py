@@ -95,6 +95,65 @@ class DetectWindow(QMainWindow):
         )
         self._setup_detection_menu()
         self._setup_linear_menu()
+        self._setup_edit_camera_menu(camera_enabled)
+
+    def _setup_edit_camera_menu(self, camera_enabled):
+        camera = self._detectMain.mainCamera
+        action = QAction("Enable Camera", self)
+        action.setObjectName("actionEnableCamera")
+        action.setCheckable(True)
+        self._uiWindow.actionEnableCamera = action
+
+        menubar = self._uiWindow.menubar
+        edit_menu = self._uiWindow.menuEdit
+        for submenu in (
+            self._uiWindow.menuDetection,
+            self._uiWindow.menuLinear,
+        ):
+            menubar.removeAction(submenu.menuAction())
+
+        edit_menu.addSeparator()
+        edit_menu.addAction(action)
+        edit_menu.addAction(self._uiWindow.menuDetection.menuAction())
+        edit_menu.addAction(self._uiWindow.menuLinear.menuAction())
+
+        camera.set_camera_toggle_visible(False)
+        camera.camera_state_changed.connect(self._sync_camera_action)
+        action.triggered.connect(self._apply_camera_action)
+        self._camera_available = bool(
+            camera_enabled and getattr(camera, "camera_enabled", False)
+        )
+        self._sync_camera_action(camera.camera_state)
+        if self._camera_available and camera.camera_state == camera.STATE_OFF:
+            camera.start_camera()
+            self._sync_camera_action(camera.camera_state)
+
+    @Slot(bool)
+    def _apply_camera_action(self, enabled):
+        camera = self._detectMain.mainCamera
+        if enabled:
+            self._sync_camera_action(camera.camera_state)
+            camera.start_camera()
+        else:
+            camera.stop_camera()
+        self._sync_camera_action(camera.camera_state)
+
+    @Slot(str)
+    def _sync_camera_action(self, state):
+        action = self._uiWindow.actionEnableCamera
+        camera = self._detectMain.mainCamera
+        checked = state == camera.STATE_ON
+        blocker = QSignalBlocker(action)
+        try:
+            action.setChecked(checked)
+        finally:
+            del blocker
+        action.setEnabled(
+            self._camera_available
+            and not self._close_wait_pending
+            and not self._shutdown_started
+            and state in (camera.STATE_OFF, camera.STATE_STARTING, camera.STATE_ON)
+        )
 
     def _setup_detection_menu(self):
         self._detection_scope_group = QActionGroup(self)
@@ -382,6 +441,7 @@ class DetectWindow(QMainWindow):
             self._uiWindow.actionPrint_Preview,
             self._uiWindow.actionExport_Pdf,
             self._uiWindow.actionPreferences,
+            self._uiWindow.actionEnableCamera,
         )
         if disabled:
             if self._close_control_states is None:
@@ -401,6 +461,9 @@ class DetectWindow(QMainWindow):
                 camera_enabled
             )
             self._close_control_states = None
+            self._sync_camera_action(
+                self._detectMain.mainCamera.camera_state
+            )
 
     @Slot(int)
     def onClickDir(self, index):

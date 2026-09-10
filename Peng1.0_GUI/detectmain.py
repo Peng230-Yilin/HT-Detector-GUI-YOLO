@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
                                 QDialog, QFontComboBox,QTextEdit, QInputDialog,
                                 QLineEdit, QMenu, QMessageBox,QProgressBar, QToolBar,
                                 QVBoxLayout, QWidget, QTreeView, QTableView, QFileSystemModel,
-                                QHeaderView, QHBoxLayout, QSplitter)
+                                QHeaderView, QHBoxLayout, QSplitter, QLabel, QSizePolicy)
 from PySide6.QtGui import (QAction, QGuiApplication, QIcon, QKeySequence, QStandardItemModel,
                             QStandardItem, QImage, QPixmap)
 from PySide6.QtCore import (QUrl, Qt, Slot, Signal, QDir, QEvent, QThread,
@@ -101,6 +101,16 @@ class _ResultPaneViewState:
     model: object
     tab_text: str
     table_label_text: str
+    tooltip: str = ""
+
+
+@dataclass
+class _DetectionImageResult:
+    # Only the annotated frame and the existing single-image export fields.
+    # Samples/errors remain in BatchState; no original image or full payload copy.
+    payload: dict
+    dirty: bool
+    warnings: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -169,6 +179,7 @@ class DetectMain(QWidget):
         self._shutdown_ready_emitted = False
         self._batch_controller = BatchDetectionController()
         self._detection_weight_path = None
+        self._install_detection_browser()
 
 #        #put the cameraWidget in cameraMainlVLayout
         self.mainCamera = Camera(camera_enabled=camera_enabled)
@@ -320,10 +331,11 @@ class DetectMain(QWidget):
 
 
 
-        # Detection display table: read from only_table/
-        det_disp_headers, det_disp_rows = self._read_excel(
-            GUI_RESOURCE_ROOT / 'interface/detect/only_table/detection_table.xlsx')
-        self._populate_tableview(self.ui.tabviewRecg, det_disp_headers, det_disp_rows)
+        # A new instance has no Detection result. Establish the empty view and
+        # shared indicators before capturing any initial result-pane snapshot.
+        self._populate_tableview(
+            self.ui.tabviewRecg, ["No.", "Con.", "Red", "Green", "Blue"], []
+        )
         self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
@@ -332,11 +344,13 @@ class DetectMain(QWidget):
         self.origImg = self._resolve_image(
             GUI_RESOURCE_ROOT / 'interface/linear/image/linear_regression_image'
         )
-        self.recgImg = self._resolve_image(
-            GUI_RESOURCE_ROOT / 'interface/detect/image/detection_image'
-        )
+        self.recgImg = None
         self._origPixmap = QPixmap(str(self.origImg))
-        self._recgPixmap = QPixmap(str(self.recgImg))
+        self._recgPixmap = None
+        self.ui.labelRecgImg.setText("No Detection result yet.")
+        self.ui.progressBar.setRange(0, 100)
+        self.ui.progressBar.setValue(0)
+        self.ui.lcdNumber.display(0)
         for lbl in (self.ui.labelOrigImg, self.ui.labelRecgImg):
             lbl.setMinimumSize(1, 1)
             lbl.setAlignment(Qt.AlignCenter)
@@ -346,16 +360,6 @@ class DetectMain(QWidget):
             lbl.installEventFilter(self)
         self._update_image_scales()
         self._detection_view_state = self._capture_result_pane_view()
-
-        self.ui.progressBar.setValue(100)
-        try:
-            with open(GUI_RESOURCE_ROOT / 'interface/detect/time.txt', 'r', encoding='utf-8') as f:
-                raw = f.read().strip()
-            digits = ''.join(ch for ch in raw if ch.isdigit())
-            if digits:
-                self.ui.lcdNumber.display(int(digits))
-        except OSError:
-            pass
 
         self._detection_thread = QThread(self)
         self._detection_worker = YoloDetectionWorker()
@@ -496,6 +500,7 @@ class DetectMain(QWidget):
         self._update_save_button()
 
     def _clear_detection_results_for_new_run(self):
+        DetectMain._reset_detection_browser(self)
         self._detection_result = None
         self._detection_dirty = False
         if self._last_completed_result_type == "detection":
@@ -513,6 +518,196 @@ class DetectMain(QWidget):
                 QHeaderView.Stretch
             )
         self._update_save_button()
+
+    def _install_detection_browser(self):
+        browser = QWidget(self.ui.groupBox_3)
+        browser.setObjectName("detectionBrowser")
+        browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout = QHBoxLayout(browser)
+        layout.setContentsMargins(0, 0, 0, 0)
+        caption = QLabel("Detection results:", browser)
+        selector = QComboBox(browser)
+        selector.setObjectName("detectionImageSelector")
+        selector.setAccessibleName("Detection image and processing status")
+        selector.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        selector.setMinimumContentsLength(24)
+        caption.setBuddy(selector)
+        layout.addWidget(caption)
+        layout.addWidget(selector, 1)
+        self.ui.verticalLayout_11.insertWidget(0, browser, 0)
+        self.ui.detectionBrowser = browser
+        self.ui.detectionImageSelector = selector
+        selector.currentIndexChanged.connect(self._on_detection_selection_changed)
+        DetectMain._reset_detection_browser(self)
+        DetectMain._update_detection_browser_controls(self)
+
+    def _reset_detection_browser(self):
+        controller = self._batch_controller
+        self._detection_cache_state = controller.state
+        self._detection_cache_run_token = controller.run_token
+        self._detection_image_results = {}
+        self._detection_selected_key = None
+        self._detection_planned_orders = tuple(
+            [controller.state.current_image.image_order]
+            if controller.state.images and controller.state.detection_scope == DetectionScope.CURRENT_IMAGE
+            else [image.image_order for image in controller.state.images]
+        )
+        self._detection_run_scope = controller.state.detection_scope
+        DetectMain._refresh_detection_browser(self)
+
+    def _ensure_detection_run(self):
+        controller = self._batch_controller
+        if (getattr(self, "_detection_cache_state", None) is not controller.state
+                or getattr(self, "_detection_cache_run_token", None) != controller.run_token):
+            DetectMain._reset_detection_browser(self)
+
+    def _detection_key(self, image):
+        return (self._detection_cache_run_token, image.image_order, image.path)
+
+    def _selected_detection_record(self):
+        controller = getattr(self, "_batch_controller", None)
+        if (controller is None
+                or getattr(self, "_detection_cache_state", None) is not controller.state):
+            return None
+        return getattr(self, "_detection_image_results", {}).get(
+            getattr(self, "_detection_selected_key", None)
+        )
+
+    def _update_detection_browser_controls(self):
+        browser = getattr(self.ui, "detectionBrowser", None)
+        if browser is None:
+            return
+        single = self._linear_mode == LINEAR_MODE_SINGLE_IMAGE
+        browser.setVisible(single)
+        self.ui.detectionImageSelector.setEnabled(
+            single and bool(self._batch_controller.state.images)
+            and self._active_worker_task is None and not self._batch_controller.active
+            and not self._close_wait_pending and not self._shutdown_requested
+        )
+
+    def _refresh_detection_browser(self):
+        selector = getattr(self.ui, "detectionImageSelector", None)
+        if selector is None:
+            return
+        previous = selector.blockSignals(True)
+        try:
+            selector.clear()
+            selected_index = -1
+            for index, image in enumerate(self._batch_controller.state.images):
+                key = DetectMain._detection_key(self, image)
+                record = self._detection_image_results.get(key)
+                suffix = " / unsaved" if record is not None and record.dirty else ""
+                selector.addItem("{}. {} [{}{}]".format(
+                    image.image_order, image.original_filename, image.status.value, suffix
+                ), key)
+                _, tooltip = DetectMain._detection_image_description(self, image)
+                selector.setItemData(index, tooltip, Qt.ToolTipRole)
+                if key == self._detection_selected_key:
+                    selected_index = index
+            selector.setCurrentIndex(selected_index)
+            selector.setToolTip(
+                selector.itemData(selected_index, Qt.ToolTipRole) if selected_index >= 0 else ""
+            )
+        finally:
+            selector.blockSignals(previous)
+
+    @Slot(int)
+    def _on_detection_selection_changed(self, index):
+        if (self._linear_mode != LINEAR_MODE_SINGLE_IMAGE
+                or self._active_worker_task is not None or self._batch_controller.active
+                or self._close_wait_pending or self._shutdown_requested):
+            DetectMain._refresh_detection_browser(self)
+            return
+        images = self._batch_controller.state.images
+        if 0 <= index < len(images):
+            DetectMain._show_detection_image(self, images[index])
+
+    def _detection_image_description(self, image):
+        key = DetectMain._detection_key(self, image)
+        record = self._detection_image_results.get(key)
+        successful = image.status == ImageStatus.COMPLETED and record is not None
+        status = "{}. {} — {}".format(image.image_order, image.original_filename, image.status.value)
+        if successful:
+            status += " / {}".format("unsaved" if record.dirty else "saved")
+        reasons = [str(error.reason) for error in image.errors]
+        if record is not None:
+            reasons.extend(record.warnings)
+        if image.status == ImageStatus.PENDING:
+            reasons.append("This image has not been processed.")
+        elif image.status == ImageStatus.FAILED and not reasons:
+            reasons.append("Detection produced no valid samples.")
+        status += "\n" + image.path
+        if reasons:
+            status += "\n" + "\n".join(dict.fromkeys(reasons))
+        return "Image {} — {}".format(image.image_order, image.status.value), status
+
+    def _show_detection_image(self, image, select_for_save=True):
+        key = DetectMain._detection_key(self, image)
+        record = self._detection_image_results.get(key)
+        successful = image.status == ImageStatus.COMPLETED and record is not None
+        result = record.payload if successful else None
+        headers = ["No.", "Con.", "Red", "Green", "Blue"]
+        rows = [tuple(target[h] for h in headers) for target in result["targets"]] if result else []
+        model = self._build_table_model(headers, rows)
+        pixmap = self._bgr_image_to_pixmap(record.payload["image"]) if record else None
+        status, tooltip = DetectMain._detection_image_description(self, image)
+        self._detection_selected_key = key
+        self._detection_result = result
+        if select_for_save:
+            self._last_completed_result_type = "detection"
+        DetectMain._publish_detection_result_view(
+            self, pixmap, model, "" if pixmap is not None else status, tooltip
+        )
+        DetectMain._refresh_detection_browser(self)
+        self._update_save_button()
+
+    def _detection_run_counts(self):
+        images = self._batch_controller.state.images
+        planned = set(self._detection_planned_orders)
+        successful = sum(i.image_order in planned and i.status == ImageStatus.COMPLETED for i in images)
+        failed = sum(i.image_order in planned and i.status == ImageStatus.FAILED for i in images)
+        return dict(imported=len(images), planned=len(planned), completed=successful + failed,
+                    successful=successful, failed=failed, not_included=len(images) - len(planned),
+                    unfinished=len(planned) - successful - failed)
+
+    def _detection_run_description(self):
+        counts = DetectMain._detection_run_counts(self)
+        current = self._detection_run_scope == DetectionScope.CURRENT_IMAGE
+        text = "Imported images: {imported} | Planned this run: {planned} | Scope: ".format(**counts)
+        text += "Current Image" if current else "Entire Batch"
+        if current and self._detection_planned_orders:
+            target = next(i for i in self._batch_controller.state.images
+                          if i.image_order == self._detection_planned_orders[0])
+            text += " | Target: " + target.original_filename
+        return text
+
+    def _detection_result_matches(self, payload, require_source=False):
+        if not isinstance(payload, dict):
+            return False
+        if any(type(payload.get(name)) is not int for name in ("run_token", "job_token")):
+            return False
+        if not self._batch_controller.matches_active_result(payload):
+            return False
+        task = self._batch_controller.active_job
+        # Detection failures currently carry tokens only. Validate all additional
+        # identity fields when supplied, and require the worker's path on success.
+        if require_source and payload.get("source_path") != task.path:
+            return False
+        for name, expected in (("source_path", task.path), ("normalized_path", task.path),
+                               ("image_order", task.image_order), ("source_file", task.source_file)):
+            if name in payload and (type(payload[name]) is not type(expected) or payload[name] != expected):
+                return False
+        for name in (("sample_results", "sample_errors") if require_source else ()):
+            values = payload.get(name, [])
+            if isinstance(values, list):
+                for value in values:
+                    if isinstance(value, dict) and (
+                        type(value.get("image_order")) is not int
+                        or value["image_order"] != task.image_order
+                        or value.get("source_file") != task.source_file
+                    ):
+                        return False
+        return True
 
     @staticmethod
     def _validated_source_path(source_path, description):
@@ -616,6 +811,16 @@ class DetectMain(QWidget):
     def _pending_save_type(self):
         if self._last_completed_result_type == "linear" and self._regression_dirty:
             return "linear"
+        if (getattr(self, "_detection_selected_key", None) is not None
+                and self._last_completed_result_type == "detection"):
+            record = DetectMain._selected_detection_record(self)
+            if record is not None and record.dirty:
+                return "detection"
+            # Preserve the Linear fallback when this selection has no unsaved
+            # Detection result, without choosing a different Detection image.
+            if self._regression_dirty:
+                return "linear"
+            return "detection"
         if self._last_completed_result_type == "detection" and self._detection_dirty:
             return "detection"
         if self._regression_dirty:
@@ -632,16 +837,28 @@ class DetectMain(QWidget):
         elif pending == "detection":
             text = "Save Detection"
             available = self._has_valid_detection_export()
+            record = DetectMain._selected_detection_record(self)
+            if getattr(self, "_detection_selected_key", None) is not None:
+                available = available and record is not None and record.dirty
         else:
             text = "Save"
             available = False
         self.ui.pushButton_8.setText(text)
+        if hasattr(self.ui.pushButton_8, "setToolTip"):
+            target = self._detection_result if pending == "detection" else None
+            source_path = target.get("source_path") if isinstance(target, dict) else None
+            self.ui.pushButton_8.setToolTip(
+                "Save Detection: {}\n{}".format(Path(source_path).name, source_path)
+                if source_path else ("Select a successful Detection image to save."
+                                     if pending == "detection" else "")
+            )
         single_mode = (
             getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
             == LINEAR_MODE_SINGLE_IMAGE
         )
         self.ui.pushButton_8.setEnabled(
             available and self._active_worker_task is None and single_mode
+            and not self._close_wait_pending and not self._shutdown_requested
         )
 
     @Slot()
@@ -766,6 +983,10 @@ class DetectMain(QWidget):
 
     def _validated_detection_export_payload(self, payload=_USE_CURRENT_RESULT):
         if payload is _USE_CURRENT_RESULT:
+            if getattr(self, "_detection_selected_key", None) is not None:
+                record = DetectMain._selected_detection_record(self)
+                if record is None or self._detection_result is not record.payload:
+                    raise ValueError("The selected image has no successful Detection result to save.")
             payload = self._detection_result
         normalized = self._normalized_detection_runtime_payload(payload)
         if not normalized["targets"]:
@@ -973,17 +1194,19 @@ class DetectMain(QWidget):
     def _save_detection_result(self):
         if self._close_wait_pending or self._shutdown_requested:
             return
+        if getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE) != LINEAR_MODE_SINGLE_IMAGE:
+            return
         if self._active_worker_task is not None:
             return
         try:
             export_payload = self._validated_detection_export_payload()
         except ValueError as error:
-            self._detection_dirty = bool(self._detection_result)
             self._update_save_button()
             QMessageBox.critical(self, "Save Detection error", str(error))
             return
         repository_root = Path(__file__).resolve().parent.parent
         target_directory = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results" / "detection"
+        selected_record = DetectMain._selected_detection_record(self)
         self._set_active_worker_task("save_detection")
         try:
             try:
@@ -996,10 +1219,17 @@ class DetectMain(QWidget):
                     False, rollback_complete=True, rollback_errors=(str(error),)
                 )
             if result.committed:
-                self._detection_dirty = False
+                if selected_record is not None:
+                    selected_record.dirty = False
+                    self._detection_dirty = any(r.dirty for r in self._detection_image_results.values())
+                    DetectMain._show_detection_image(self, self._batch_controller.state.images[
+                        self._detection_selected_key[1] - 1
+                    ])
+                else:
+                    self._detection_dirty = False
                 final_xlsx, final_png = result.final_paths
-                message = "Detection results were saved to:\n{}\n{}".format(
-                    final_xlsx, final_png
+                message = "Detection result for {} was saved to:\n{}\n{}".format(
+                    Path(export_payload["source_path"]).name, final_xlsx, final_png
                 )
                 if result.cleanup_warning:
                     message += "\n\n{}".format(result.cleanup_warning)
@@ -1010,7 +1240,10 @@ class DetectMain(QWidget):
                     message_function, self, "Save Detection", message
                 )
             else:
-                self._detection_dirty = True
+                self._detection_dirty = (
+                    any(r.dirty for r in self._detection_image_results.values())
+                    if selected_record is not None else True
+                )
                 message = "Detection results were not saved."
                 if result.rollback_complete:
                     message += " This transaction's partial files were removed."
@@ -1483,6 +1716,7 @@ class DetectMain(QWidget):
                 table_label.text() if table_label is not None
                 else "Table. Detection"
             ),
+            tooltip=label.toolTip() if label is not None and hasattr(label, "toolTip") else "",
         )
 
     def _apply_result_pane_view(self, view_state):
@@ -1490,6 +1724,8 @@ class DetectMain(QWidget):
         label = getattr(self.ui, "labelRecgImg", None)
         if label is not None:
             label.clear()
+            if hasattr(label, "setToolTip"):
+                label.setToolTip(getattr(view_state, "tooltip", ""))
             if view_state.label_text:
                 label.setText(view_state.label_text)
         table = getattr(self.ui, "tabviewRecg", None)
@@ -1523,13 +1759,14 @@ class DetectMain(QWidget):
             table_label_text="Table. Linear Series",
         )
 
-    def _publish_detection_result_view(self, pixmap, model, label_text=""):
+    def _publish_detection_result_view(self, pixmap, model, label_text="", tooltip=""):
         view_state = _ResultPaneViewState(
             pixmap=pixmap,
             label_text=label_text,
             model=model,
             tab_text="Detection Image",
             table_label_text="Table. Detection",
+            tooltip=tooltip,
         )
         self._detection_view_state = view_state
         if (
@@ -1674,6 +1911,7 @@ class DetectMain(QWidget):
             ), control_snapshot):
                 button.setText(text)
                 button.setEnabled(enabled)
+            DetectMain._update_detection_browser_controls(self)
             raise
 
         if empty_selection is not None:
@@ -1751,6 +1989,7 @@ class DetectMain(QWidget):
         self.ui.pushButton_7.setEnabled(
             not busy and single_mode and self._has_valid_regression_result()
         )
+        DetectMain._update_detection_browser_controls(self)
         self._update_save_button()
         if previous_task is not None and task is None:
             self.worker_task_finished.emit()
@@ -2500,11 +2739,17 @@ class DetectMain(QWidget):
         if task is None:
             self._finish_detection_run()
             return
-        self.detection_status_changed.emit(
-            "Detecting {}/{}: {}".format(
-                task.image_order, len(self.batch_state.images), task.source_file
-            )
-        )
+        DetectMain._ensure_detection_run(self)
+        description = DetectMain._detection_run_description(self)
+        if getattr(self.ui, "detectionImageSelector", None) is not None:
+            DetectMain._show_detection_image(self, self.batch_state.current_image, select_for_save=False)
+        counts = DetectMain._detection_run_counts(self)
+        self.ui.progressBar.setRange(0, counts["planned"])
+        self.ui.progressBar.setValue(counts["completed"])
+        self.detection_status_changed.emit("Detecting {}/{}: {} | {}".format(
+            self._detection_planned_orders.index(task.image_order) + 1,
+            counts["planned"], task.source_file, description
+        ))
         self.detection_requested.emit(
             task.path, self._detection_weight_path, task.context()
         )
@@ -2518,19 +2763,20 @@ class DetectMain(QWidget):
 
     def _finish_detection_run(self):
         summary = self._batch_controller.finish_if_done()
-        if summary is not None:
-            message = (
-                "Detection completed.\nTotal images: {total_images}\n"
-                "Successful images: {successful_images}\nFailed images: {failed_images}\n"
-                "Valid samples: {valid_samples}\nSample errors: {sample_errors}"
-            ).format(**summary)
-            if self.batch_state.detection_scope == DetectionScope.ALL_IMPORTED_IMAGES:
-                self.detection_status_changed.emit(message.replace("\n", " | "))
-                self._show_message_safely(QMessageBox.information, self, "Detection", message)
-            else:
-                self.detection_status_changed.emit("Detection completed.")
-        self.ui.progressBar.setRange(0, 100)
-        self.ui.progressBar.setValue(100 if summary and summary["successful_images"] else 0)
+        if summary is None:
+            return
+        counts = DetectMain._detection_run_counts(self)
+        message = DetectMain._detection_run_description(self) + "\n" + (
+            "Completed this run: {completed}\nSuccessful images: {successful}\n"
+            "Failed images: {failed}\nNot included this run: {not_included}\n"
+            "Unfinished this run: {unfinished}"
+        ).format(**counts)
+        message += "\nValid samples: {valid_samples}\nSample errors: {sample_errors}".format(**summary)
+        self.detection_status_changed.emit(message.replace("\n", " | "))
+        if self.batch_state.detection_scope == DetectionScope.ALL_IMPORTED_IMAGES:
+            self._show_message_safely(QMessageBox.information, self, "Detection", message)
+        self.ui.progressBar.setRange(0, counts["planned"])
+        self.ui.progressBar.setValue(counts["completed"])
         self._set_active_worker_task(None)
 
     @staticmethod
@@ -2553,38 +2799,51 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_detection_finished(self, payload):
-        if (
-            not isinstance(payload, dict)
-            or not self._batch_controller.matches_active_result(payload)
-        ):
+        if not DetectMain._detection_result_matches(self, payload):
             return
         if self._close_wait_pending or self._shutdown_requested:
             self._set_active_worker_task(None)
             return
+        if not DetectMain._detection_result_matches(self, payload, require_source=True):
+            return
         accepted = False
         try:
+            DetectMain._ensure_detection_run(self)
             runtime_payload = self._normalized_detection_runtime_payload(payload)
             has_valid_samples = bool(runtime_payload["sample_results"])
-            if has_valid_samples:
-                image = runtime_payload["image"]
-                pixmap = self._bgr_image_to_pixmap(image)
-                if pixmap.isNull():
-                    raise ValueError("The detection annotated image could not be displayed.")
-                headers = ["No.", "Con.", "Red", "Green", "Blue"]
-                rows = [
-                    tuple(target[header] for header in headers)
-                    for target in runtime_payload["targets"]
-                ]
-                model = self._build_table_model(headers, rows)
+            image = runtime_payload["image"]
+            if image.dtype != np.uint8:
+                raise ValueError("The detection annotated image must contain uint8 pixels.")
+            if len(runtime_payload["targets"]) != len(runtime_payload["sample_results"]):
+                raise ValueError("Detection targets and samples must have the same length.")
+            for target, sample in zip(runtime_payload["targets"], runtime_payload["sample_results"]):
+                if any(target[channel] != sample.get(channel.lower()) for channel in ("Red", "Green", "Blue")):
+                    raise ValueError("Detection target RGB values must match the sample result.")
+            # Own one immutable annotated buffer per image, shared with the
+            # controller's latest-result reference and the selected export view.
+            annotated = np.array(image, copy=True, order="C")
+            annotated.setflags(write=False)
+            runtime_payload["image"] = annotated
+            pixmap = self._bgr_image_to_pixmap(annotated)
+            if pixmap.isNull():
+                raise ValueError("The detection annotated image could not be displayed.")
+            export_fields = ("No.", "Con.", "Red", "Green", "Blue", "rgb_roi")
+            record = _DetectionImageResult(
+                payload={"source_path": runtime_payload["source_path"], "image": annotated,
+                         "targets": [{field: t[field] for field in export_fields}
+                                     for t in runtime_payload["targets"]]},
+                dirty=has_valid_samples,
+                warnings=tuple(str(w) for w in runtime_payload["warnings"] if w),
+            )
 
             if not self._batch_controller.accept_payload(runtime_payload):
                 return
             accepted = True
             current_image = self.batch_state.current_image
+            self._detection_image_results[DetectMain._detection_key(self, current_image)] = record
+            self._detection_dirty = any(r.dirty for r in self._detection_image_results.values())
+            DetectMain._show_detection_image(self, current_image)
             if current_image.status == ImageStatus.COMPLETED:
-                DetectMain._publish_detection_result_view(
-                    self, pixmap, model
-                )
                 if (
                     getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
                     == LINEAR_MODE_SINGLE_IMAGE
@@ -2593,11 +2852,6 @@ class DetectMain(QWidget):
                     self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
                         QHeaderView.Stretch
                     )
-                self._detection_result = runtime_payload
-                self._detection_dirty = True
-                self._last_completed_result_type = "detection"
-                self.ui.progressBar.setRange(0, 100)
-                self.ui.progressBar.setValue(100)
                 warnings = [
                     str(message) for message in runtime_payload.get("warnings", [])
                     if message
@@ -2610,8 +2864,6 @@ class DetectMain(QWidget):
                         "\n".join(warnings),
                     )
             else:
-                self.ui.progressBar.setRange(0, 100)
-                self.ui.progressBar.setValue(0)
                 if self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
                     self._show_message_safely(
                         QMessageBox.warning,
@@ -2626,8 +2878,8 @@ class DetectMain(QWidget):
                 )
             if not accepted:
                 return
-            self.ui.progressBar.setRange(0, 100)
-            self.ui.progressBar.setValue(0)
+            if self.batch_state.current_image.status == ImageStatus.FAILED:
+                DetectMain._show_detection_image(self, self.batch_state.current_image)
             if self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
                 self._show_message_safely(
                     QMessageBox.warning,
@@ -2641,27 +2893,19 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_detection_failed(self, failure):
-        if isinstance(failure, dict):
-            message = str(failure.get("message", "Detection failed."))
-            run_token = failure.get("run_token")
-            job_token = failure.get("job_token")
-        else:
-            message = str(failure)
-            run_token = None
-            job_token = None
-        if not self._batch_controller.matches_active_result({
-            "run_token": run_token,
-            "job_token": job_token,
-        }):
+        if not DetectMain._detection_result_matches(self, failure):
             return
         if self._close_wait_pending or self._shutdown_requested:
             self._set_active_worker_task(None)
             return
+        message = str(failure.get("message", "Detection failed."))
+        run_token = failure["run_token"]
+        job_token = failure["job_token"]
+        DetectMain._ensure_detection_run(self)
         if not self._batch_controller.accept_failure(run_token, job_token, message):
             return
         try:
-            self.ui.progressBar.setRange(0, 100)
-            self.ui.progressBar.setValue(0)
+            DetectMain._show_detection_image(self, self.batch_state.current_image)
             if self.batch_state.detection_scope == DetectionScope.CURRENT_IMAGE:
                 self._show_message_safely(
                     QMessageBox.critical, self, "Detection error", message
@@ -2909,7 +3153,7 @@ class DetectMain(QWidget):
         self._configure_splitter(splitter, [5, 2])
 
         self.ui.verticalLayout_11.removeItem(self.ui.horizontalLayout_4)
-        self.ui.verticalLayout_11.addWidget(splitter)
+        self.ui.verticalLayout_11.addWidget(splitter, 1)
 
     def _scale_label(self, label):
         if label is getattr(self.ui, 'labelOrigImg', None):
