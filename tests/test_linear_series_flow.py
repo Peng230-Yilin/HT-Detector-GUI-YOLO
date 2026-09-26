@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-GUI_ROOT = PROJECT_ROOT / "Peng1.0_GUI"
+GUI_ROOT = PROJECT_ROOT
 sys.path.insert(0, str(GUI_ROOT))
 
 import detectmain  # noqa: E402
@@ -574,8 +574,8 @@ class LinearSeriesFlowTests(unittest.TestCase):
             rendered = str(path)
             checked_paths.append(rendered)
             portable = rendered.replace("\\", "/")
-            self.assertNotIn("HT-Detector_Peng/custom/linear_detection", portable)
-            self.assertNotIn("HT-Detector_Peng/weights", portable)
+            self.assertNotIn("YOLO_Detection_Core/custom/linear_detection", portable)
+            self.assertNotIn("YOLO_Detection_Core/weights", portable)
             self.assertEqual(Path(rendered), Path(VIRTUAL_WEIGHT))
             return True
 

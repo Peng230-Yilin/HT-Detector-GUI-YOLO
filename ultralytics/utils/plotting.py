@@ -208,8 +208,8 @@ class Annotator:
                 p2 = p1[0] + w, p1[1] - h - 3 if outside else p1[1] + h + 3
                 # cv2.rectangle(self.im, p1, p2, color, -1, cv2.LINE_AA)  # filled
                 # load the cfg from default.yaml yue
-                import yaml,os
-                yaml_file_path = os.path.join(os.getcwd(), 'ultralytics/cfg/default.yaml')
+                import yaml
+                yaml_file_path = Path(__file__).resolve().parents[1] / 'cfg' / 'default.yaml'
                 with open(yaml_file_path, 'r') as file:
                     parameters = yaml.safe_load(file)
                 show_confidence = parameters['show_conf']

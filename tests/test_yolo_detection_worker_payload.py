@@ -8,10 +8,15 @@ import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-GUI_ROOT = PROJECT_ROOT / "Peng1.0_GUI"
+GUI_ROOT = PROJECT_ROOT
 sys.path.insert(0, str(GUI_ROOT))
 
 import yolo_detection_worker as worker_module  # noqa: E402
+from batch_state import (  # noqa: E402
+    ConcentrationStatus,
+    RegressionSet,
+    normalize_internal_path,
+)
 from yolo_detection_worker import YoloDetectionWorker  # noqa: E402
 
 
@@ -75,21 +80,71 @@ def paired_boxes(cuvettes, liquids):
     return FakeBoxes(coordinates, classes)
 
 
+def formula(slope, intercept):
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r": 0.9,
+        "R2": 0.81,
+        "p": 0.01,
+        "std_err": 0.1,
+    }
+
+
+def regression_set(formulas=None, source="worker-test"):
+    formulas = formulas or {
+        "R": formula(2.0, 10.0),
+        "G": formula(4.0, 20.0),
+        "B": formula(3.0, 40.0),
+    }
+    return RegressionSet.from_formulas(
+        formulas, source_id=source, valid_ranges=(0.0, 100.0)
+    )
+
+
+def formal_detection_context(
+    source_path, run_token, job_token, image_order,
+    batch_start_no, display_start_no,
+):
+    source_path = normalize_internal_path(source_path)
+    regressions = regression_set()
+    values = {
+        "run_token": run_token,
+        "job_token": job_token,
+        "image_order": image_order,
+        "source_path": source_path,
+        "source_file": Path(source_path).name,
+        "batch_start_no": batch_start_no,
+        "display_start_no": display_start_no,
+        "regression_set": regressions,
+        "regression_revision": regressions.revision,
+    }
+    return source_path, YoloDetectionWorker.lock_detection_context(
+        source_path, values
+    )
+
+
 class WorkerPayloadTests(unittest.TestCase):
     def setUp(self):
         self.worker = YoloDetectionWorker()
 
-    def build(self, result, measurement=None, source_path="folder/source.PNG"):
-        with patch.object(self.worker, "_load_formula", return_value=(1.0, 0.0)):
-            if measurement is None:
-                return self.worker._build_payload(
-                    result, settings(), cv2, source_path=source_path
-                )
-            with patch.object(worker_module, "_calculate_measurement",
-                              side_effect=measurement):
-                return self.worker._build_payload(
-                    result, settings(), cv2, source_path=source_path
-                )
+    def build(self, result, averages=None, source_path="folder/source.PNG",
+              regressions=None):
+        kwargs = {
+            "source_path": source_path,
+            "regression_set": regressions or regression_set(),
+        }
+        if averages is None:
+            return self.worker._build_payload(result, settings(), cv2, **kwargs)
+        patch_kwargs = (
+            {"side_effect": averages}
+            if callable(averages)
+            else {"return_value": averages}
+        )
+        with patch.object(
+            worker_module, "_calculate_rgb_averages", **patch_kwargs
+        ):
+            return self.worker._build_payload(result, settings(), cv2, **kwargs)
 
     def test_success_payload_keeps_legacy_and_new_fields(self):
         result = FakeResult(paired_boxes(
@@ -104,9 +159,45 @@ class WorkerPayloadTests(unittest.TestCase):
             "cuvette_box", "liquid_box", "rgb_roi",
         })
         self.assertEqual(payload["targets"][0]["No."], 1)
-        self.assertIsNotNone(payload["sample_results"][0]["con_r"])
-        self.assertIsNone(payload["sample_results"][0]["con_g"])
-        self.assertIsNone(payload["sample_results"][0]["con_b"])
+        sample = payload["sample_results"][0]
+        self.assertIsNotNone(sample["con_r"])
+        self.assertIsNotNone(sample["con_g"])
+        self.assertIsNotNone(sample["con_b"])
+        self.assertEqual(
+            {sample["status_r"], sample["status_g"], sample["status_b"]},
+            {ConcentrationStatus.BELOW_RANGE.value},
+        )
+
+    def test_three_distinct_equations_never_cross_channels(self):
+        result = FakeResult(paired_boxes(
+            [(10, 10, 40, 90)], [(15, 30, 35, 80)]
+        ))
+        payload = self.build(result, averages=(14.0, 28.0, 49.0))
+        sample = payload["sample_results"][0]
+        self.assertEqual(
+            (sample["con_r"], sample["con_g"], sample["con_b"]),
+            (2.0, 2.0, 3.0),
+        )
+        self.assertEqual(payload["targets"][0]["Con."], sample["con_r"])
+
+    def test_one_invalid_channel_does_not_affect_other_channels_or_numbering(self):
+        result = FakeResult(paired_boxes(
+            [(10, 10, 40, 90)], [(15, 30, 35, 80)]
+        ))
+        regressions = regression_set({
+            "R": formula(2.0, 10.0),
+            "G": formula(0.0, 20.0),
+            "B": formula(3.0, 40.0),
+        }, source="partial")
+        payload = self.build(
+            result, averages=(14.0, 28.0, 49.0), regressions=regressions
+        )
+        sample = payload["sample_results"][0]
+        self.assertEqual(sample["no_in_image"], 1)
+        self.assertEqual(sample["con_r"], 2.0)
+        self.assertIsNone(sample["con_g"])
+        self.assertEqual(sample["status_g"], ConcentrationStatus.INVALID_SLOPE.value)
+        self.assertEqual(sample["con_b"], 3.0)
 
     def test_display_number_matches_legacy_target_and_real_drawing_calls(self):
         result = FakeResult(paired_boxes(
@@ -119,13 +210,12 @@ class WorkerPayloadTests(unittest.TestCase):
         )
         for name, image_order, batch_start_no, display_start_no in scenarios:
             with self.subTest(name=name), \
-                    patch.object(self.worker, "_load_formula",
-                                 return_value=(1.0, 0.0)), \
                     patch.object(cv2, "putText", wraps=cv2.putText) as put_text:
                 payload = self.worker._build_payload(
                     result, settings(), cv2, source_path="second.png",
                     image_order=image_order, batch_start_no=batch_start_no,
                     display_start_no=display_start_no,
+                    regression_set=regression_set(),
                 )
 
             expected_display_no = display_start_no
@@ -161,12 +251,12 @@ class WorkerPayloadTests(unittest.TestCase):
             [(15, 30, 35, 80), (75, 30, 95, 80), (135, 30, 155, 80)],
         ))
 
-        def measurement(_image, roi, _accuracy, _channel, _slope, _intercept):
+        def averages(_image, roi, _accuracy):
             if 40 <= roi[0] < 100:
-                raise ValueError("The calculated concentration is not finite.")
-            return 10.0, 20.0, 30.0, 4.0
+                raise ValueError("The calculated RGB values are not finite.")
+            return 10.0, 20.0, 30.0
 
-        payload = self.build(result, measurement=measurement)
+        payload = self.build(result, averages=averages)
         self.assertEqual([target["No."] for target in payload["targets"]], [1, 2])
         self.assertEqual(
             [error["error_type"] for error in payload["sample_errors"]],
@@ -194,19 +284,25 @@ class WorkerPayloadTests(unittest.TestCase):
         failures = []
         self.worker.finished.connect(completed.append)
         self.worker.failed.connect(failures.append)
+        source_path, context = formal_detection_context(
+            "virtual/source.png", 5, 8, 1, 1, 1
+        )
+        regressions = context["regression_set"]
         with patch.object(worker_module, "load_effective_settings",
                           return_value=(settings(), [], None)), \
                 patch.object(np, "fromfile", return_value=np.array([1], dtype=np.uint8)), \
                 patch.object(cv2, "imdecode", return_value=result.orig_img), \
                 patch.object(self.worker, "_get_model", return_value=FakeModel()), \
-                patch.object(self.worker, "_load_formula", return_value=(1.0, 0.0)):
-            self.worker.detect("virtual/source.png", "unused.pt")
+                patch.object(self.worker, "_load_formula",
+                             side_effect=AssertionError("formula files must not be read")):
+            self.worker.detect(source_path, "unused.pt", context)
         self.assertEqual(failures, [])
         self.assertEqual(len(completed), 1)
-        self.assertEqual(completed[0]["source_path"], "virtual/source.png")
+        self.assertEqual(completed[0]["source_path"], source_path)
         self.assertEqual(completed[0]["sample_results"][0]["source_file"], "source.png")
-        self.assertIsNone(completed[0]["run_token"])
-        self.assertIsNone(completed[0]["job_token"])
+        self.assertEqual(completed[0]["run_token"], 5)
+        self.assertEqual(completed[0]["job_token"], 8)
+        self.assertEqual(completed[0]["regression_revision"], regressions.revision)
 
     def test_detect_propagates_run_and_job_tokens_on_success(self):
         result = FakeResult(paired_boxes(
@@ -219,30 +315,43 @@ class WorkerPayloadTests(unittest.TestCase):
 
         completed = []
         self.worker.finished.connect(completed.append)
-        context = {"run_token": 17, "job_token": "job-2"}
+        source_path, context = formal_detection_context(
+            "virtual/source.png", 17, 19, 3, 31, 7
+        )
+        regressions = context["regression_set"]
         with patch.object(worker_module, "load_effective_settings",
                           return_value=(settings(), [], None)), \
                 patch.object(np, "fromfile", return_value=np.array([1], dtype=np.uint8)), \
                 patch.object(cv2, "imdecode", return_value=result.orig_img), \
-                patch.object(self.worker, "_get_model", return_value=FakeModel()), \
-                patch.object(self.worker, "_load_formula", return_value=(1.0, 0.0)):
-            self.worker.detect("virtual/source.png", "unused.pt", context)
+                patch.object(self.worker, "_get_model", return_value=FakeModel()):
+            self.worker.detect(source_path, "unused.pt", context)
 
         self.assertEqual(completed[0]["run_token"], 17)
-        self.assertEqual(completed[0]["job_token"], "job-2")
+        self.assertEqual(completed[0]["job_token"], 19)
+        self.assertEqual(completed[0]["regression_revision"], regressions.revision)
+        self.assertEqual(completed[0]["image_order"], 3)
+        self.assertEqual(completed[0]["source_path"], source_path)
+        self.assertEqual(completed[0]["source_file"], "source.png")
 
     def test_detect_propagates_run_and_job_tokens_on_failure(self):
         failures = []
         self.worker.failed.connect(failures.append)
-        context = {"run_token": 23, "job_token": "job-4"}
+        source_path, context = formal_detection_context(
+            "virtual/source.png", 23, 29, 5, 41, 11
+        )
+        regressions = context["regression_set"]
         with patch.object(worker_module, "load_effective_settings",
                           side_effect=RuntimeError("settings unavailable")):
-            self.worker.detect("virtual/source.png", "unused.pt", context)
+            self.worker.detect(source_path, "unused.pt", context)
 
         self.assertEqual(len(failures), 1)
         self.assertIn("settings unavailable", failures[0]["message"])
         self.assertEqual(failures[0]["run_token"], 23)
-        self.assertEqual(failures[0]["job_token"], "job-4")
+        self.assertEqual(failures[0]["job_token"], 29)
+        self.assertEqual(failures[0]["regression_revision"], regressions.revision)
+        self.assertEqual(failures[0]["image_order"], 5)
+        self.assertEqual(failures[0]["source_path"], source_path)
+        self.assertEqual(failures[0]["source_file"], "source.png")
 
 
 if __name__ == "__main__":

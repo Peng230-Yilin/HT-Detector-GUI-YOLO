@@ -117,7 +117,7 @@
              </item>
              <item>
               <layout class="QGridLayout" name="gridLayout">
-               <item row="1" column="0">
+               <item row="0" column="0">
                 <spacer name="horizontalSpacer_5">
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
@@ -130,21 +130,21 @@
                  </property>
                 </spacer>
                </item>
-               <item row="1" column="1">
+               <item row="0" column="1">
                 <widget class="QPushButton" name="pushButton_5">
                  <property name="text">
                   <string>  Import Image  </string>
                  </property>
                 </widget>
                </item>
-               <item row="1" column="9">
+               <item row="0" column="9">
                 <widget class="QPushButton" name="pushButton_8">
                  <property name="text">
                   <string>Save</string>
                  </property>
                 </widget>
                </item>
-               <item row="1" column="2">
+               <item row="0" column="2">
                 <spacer name="horizontalSpacer">
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
@@ -157,14 +157,14 @@
                  </property>
                 </spacer>
                </item>
-               <item row="1" column="3">
+               <item row="0" column="3">
                 <widget class="QPushButton" name="pushButton_4">
                  <property name="text">
                   <string>  Linear Regression  </string>
                  </property>
                 </widget>
                </item>
-               <item row="1" column="8">
+               <item row="0" column="8">
                 <spacer name="horizontalSpacer_4">
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
@@ -177,14 +177,14 @@
                  </property>
                 </spacer>
                </item>
-               <item row="1" column="5">
+               <item row="0" column="5">
                 <widget class="QPushButton" name="pushButton_7">
                  <property name="text">
                   <string>Plot</string>
                  </property>
                 </widget>
                </item>
-               <item row="1" column="4">
+               <item row="0" column="4">
                 <spacer name="horizontalSpacer_2">
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
@@ -197,7 +197,7 @@
                  </property>
                 </spacer>
                </item>
-               <item row="1" column="6">
+               <item row="0" column="6">
                 <spacer name="horizontalSpacer_3">
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
@@ -210,14 +210,14 @@
                  </property>
                 </spacer>
                </item>
-               <item row="1" column="7">
+               <item row="0" column="7">
                 <widget class="QPushButton" name="pushButton">
                  <property name="text">
                   <string>Detect</string>
                  </property>
                 </widget>
                </item>
-               <item row="1" column="10">
+               <item row="0" column="10">
                 <spacer name="horizontalSpacer_6">
                  <property name="orientation">
                   <enum>Qt::Orientation::Horizontal</enum>
@@ -358,7 +358,7 @@
                     <enum>QFrame::Shadow::Raised</enum>
                    </property>
                    <property name="text">
-                    <string>Period:</string>
+                      <string>Time (ms):</string>
                    </property>
                   </widget>
                  </item>
@@ -370,8 +370,8 @@
                    <property name="frameShape">
                     <enum>QFrame::Shape::Panel</enum>
                    </property>
-                   <property name="intValue" stdset="0">
-                    <number>377</number>
+                   <property name="digitCount">
+                     <number>10</number>
                    </property>
                   </widget>
                  </item>

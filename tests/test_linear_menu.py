@@ -12,7 +12,7 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
-GUI_ROOT = ROOT / "Peng1.0_GUI"
+GUI_ROOT = ROOT
 UI_ROOT = GUI_ROOT / "ui"
 sys.path.insert(0, str(GUI_ROOT))
 

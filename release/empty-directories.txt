@@ -1,2 +1,2 @@
-HT-Detector_Peng/custom/linear_detection/linear
-HT-Detector_Peng/custom/linear_detection/detection
+custom/linear_detection/linear
+custom/linear_detection/detection

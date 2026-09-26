@@ -12,10 +12,16 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "Peng1.0_GUI"))
+sys.path.insert(0, str(ROOT))
 
 from batch_detection_controller import BatchDetectionController  # noqa: E402
-from batch_state import DetectionScope, ImageStatus, NumberingMode  # noqa: E402
+from batch_state import (  # noqa: E402
+    ConcentrationStatus,
+    DetectionScope,
+    ImageStatus,
+    NumberingMode,
+    RegressionSet,
+)
 from detectmain import DetectMain  # noqa: E402
 import detectmain  # noqa: E402
 import detectionwindow  # noqa: E402
@@ -33,9 +39,9 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 
-PROTECTED_DETECTION_DIRECTORY = ROOT / "HT-Detector_Peng" / "custom" / \
+PROTECTED_DETECTION_DIRECTORY = ROOT / "YOLO_Detection_Core" / "custom" / \
     "linear_detection" / "detection"
-DETECTION_WEIGHT_PATH = ROOT / "HT-Detector_Peng" / "weights" / \
+DETECTION_WEIGHT_PATH = ROOT / "weights" / \
     "cuvette_Peng" / "yolov8n_train" / "weights" / "best.pt"
 
 
@@ -111,6 +117,12 @@ def sample_result(image_order, filename, no_in_image, batch_no):
         "red": 1.0,
         "green": 2.0,
         "blue": 3.0,
+        "con_r": 0.5,
+        "con_g": 0.75,
+        "con_b": 1.0,
+        "status_r": ConcentrationStatus.IN_RANGE.value,
+        "status_g": ConcentrationStatus.IN_RANGE.value,
+        "status_b": ConcentrationStatus.IN_RANGE.value,
         "no_in_image": no_in_image,
         "batch_no": batch_no,
         "status": "valid",
@@ -122,12 +134,28 @@ def payload(task, count=1, errors=None):
     return {
         "run_token": task.run_token,
         "job_token": task.job_token,
+        "regression_revision": task.regression_revision,
+        "image_order": task.image_order,
+        "source_path": task.path,
+        "source_file": task.source_file,
         "sample_results": [
             sample_result(task.image_order, task.source_file, index,
                           task.batch_start_no + index - 1)
             for index in range(1, count + 1)
         ],
         "sample_errors": list(errors or []),
+    }
+
+
+def failure_payload(task, message):
+    return {
+        "run_token": task.run_token,
+        "job_token": task.job_token,
+        "regression_revision": task.regression_revision,
+        "image_order": task.image_order,
+        "source_path": task.path,
+        "source_file": task.source_file,
+        "message": message,
     }
 
 
@@ -150,6 +178,7 @@ def runtime_payload(task, count=1, errors=None, warnings=None):
             for index in range(1, count + 1)
         ],
         "warnings": list(warnings or []),
+        "display_channel": "R",
     })
     return result
 
@@ -226,7 +255,7 @@ class BatchDetectionControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.matches_active_result(first_result))
         self.assertFalse(self.controller.accept_payload(first_result))
         self.assertFalse(self.controller.accept_failure(
-            first.run_token, first.job_token, "late failure"
+            failure_payload(first, "late failure")
         ))
 
         self.assertIs(self.controller.active_job, active_job)
@@ -241,7 +270,7 @@ class BatchDetectionControllerTests(unittest.TestCase):
         self.select(["a.png", "b.png"])
         first = self.controller.begin()
         self.assertTrue(self.controller.accept_failure(
-            first.run_token, first.job_token, "broken image"
+            failure_payload(first, "broken image")
         ))
         second = self.controller.next_task()
         partial_error = {
@@ -310,7 +339,7 @@ class BatchDetectionControllerTests(unittest.TestCase):
         self.controller.accept_payload(payload(first, 2))
         second = self.controller.next_task()
         self.assertEqual((first.display_start_no, second.display_start_no), (1, 3))
-        self.controller.accept_failure(second.run_token, second.job_token, "fail")
+        self.controller.accept_failure(failure_payload(second, "fail"))
         self.controller.finish_if_done()
         self.select(["a.png", "b.png"], numbering="per_image")
         first = self.controller.begin()
@@ -348,14 +377,16 @@ class BatchDetectionControllerTests(unittest.TestCase):
         wrong_job["job_token"] += 100
         self.assertFalse(self.controller.accept_payload(wrong_job))
         self.assertFalse(self.controller.accept_failure(
-            wrong_job["run_token"], wrong_job["job_token"], "wrong job"
+            dict(wrong_job, message="wrong job")
         ))
         stale = payload(task)
         stale["run_token"] += 100
         self.assertFalse(self.controller.accept_payload(stale))
-        self.assertFalse(self.controller.accept_failure(
-            stale["run_token"], stale["job_token"], "old"
-        ))
+        self.assertFalse(self.controller.accept_failure(dict(stale, message="old")))
+        wrong_revision = payload(task)
+        wrong_revision["regression_revision"] = "0" * 64
+        self.assertFalse(self.controller.matches_active_result(wrong_revision))
+        self.assertFalse(self.controller.accept_payload(wrong_revision))
         self.assertIs(self.controller.active_job, active_job)
         self.assertEqual(self.controller.state.images[0].status, ImageStatus.PROCESSING)
 
@@ -373,7 +404,7 @@ class BatchDetectionControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.accept_payload(first_result))
         self.assertIsNone(self.controller.state.last_batch_result)
         self.assertTrue(self.controller.accept_failure(
-            second.run_token, second.job_token, "second run failed"
+            failure_payload(second, "second run failed")
         ))
         self.controller.finish_if_done()
         self.assertIsNone(self.controller.state.last_batch_result)
@@ -505,6 +536,9 @@ class SelectionHarness:
 
     def _dispatch_detection_task(self, task):
         self.dispatched.append(task)
+
+    def _regression_set_for_detection(self):
+        return RegressionSet.missing("selection-harness")
 
 
 class DetectionSelectionCancelTests(unittest.TestCase):
@@ -640,11 +674,9 @@ class DetectionHandlerTests(unittest.TestCase):
             with self.subTest(guard_name=guard_name):
                 setattr(harness, guard_name, True)
                 DetectMain._on_detection_finished(harness, first_result)
-                DetectMain._on_detection_failed(harness, {
-                    "run_token": first.run_token,
-                    "job_token": first.job_token,
-                    "message": "late failure while closing",
-                })
+                DetectMain._on_detection_failed(
+                    harness, failure_payload(first, "late failure while closing")
+                )
                 setattr(harness, guard_name, False)
                 self.assertIs(harness._batch_controller.active_job, active_job)
                 self.assertEqual(harness._active_worker_task, busy)
@@ -781,11 +813,9 @@ class DetectionHandlerTests(unittest.TestCase):
         self.assertEqual(harness.ui.tabviewRecg.model()[1], ())
         self.assertTrue(harness.ui.labelRecgImg.cleared)
 
-        DetectMain._on_detection_failed(harness, {
-            "run_token": second.run_token,
-            "job_token": second.job_token,
-            "message": "second run failed",
-        })
+        DetectMain._on_detection_failed(
+            harness, failure_payload(second, "second run failed")
+        )
         self.assertIsNone(harness._detection_result)
         self.assertIsNone(harness.batch_state.last_batch_result)
         self.assertFalse(harness.ui.pushButton_8.isEnabled())
@@ -814,9 +844,7 @@ class DetectionProgressTests(unittest.TestCase):
         self.assertTrue(harness.detection_status_changed.values[-1][0].startswith(
             "Detecting 2/2: image2.png | Imported images: 2 | Planned this run: 2"
         ))
-        harness._batch_controller.accept_failure(
-            second.run_token, second.job_token, "broken"
-        )
+        harness._batch_controller.accept_failure(failure_payload(second, "broken"))
         DetectMain._finish_detection_run(harness)
         self.assertIn("Imported images: 2", harness.messages[0][1])
         self.assertIn("Completed this run: 2", harness.messages[0][1])
@@ -850,9 +878,7 @@ class DetectionSelectionTests(unittest.TestCase):
         self.assertIsNone(harness._detection_result)
         self.assertIsNone(harness._last_completed_result_type)
         harness._batch_controller.accept_failure(
-            harness.dispatched[-1].run_token,
-            harness.dispatched[-1].job_token,
-            "done",
+            failure_payload(harness.dispatched[-1], "done")
         )
         harness._batch_controller.finish_if_done()
         harness._active_worker_task = None
@@ -996,6 +1022,7 @@ class DetectionBrowserContractTests(unittest.TestCase):
         for index, (target, sample) in enumerate(zip(result["targets"], result["sample_results"])):
             target["Red"] = sample["red"] = task.image_order + 0.123456789 + index
             target["Con."] = task.image_order + 0.7654321 + index
+            sample["con_r"] = target["Con."]
         return result
 
     def finish_all(self):
@@ -1112,7 +1139,10 @@ class DetectionBrowserContractTests(unittest.TestCase):
         result["targets"][0]["Red"] = 999
         self.select(1)
         chosen = self.select(0)
-        self.assertEqual(set(chosen), {"source_path", "image", "targets"})
+        self.assertEqual(
+            set(chosen),
+            {"source_path", "image", "targets", "display_channel"},
+        )
         self.assertEqual(int(chosen["image"][0, 0, 0]), 10)
         self.assertEqual(chosen["targets"][0]["Red"], 1.123456789)
         self.assertEqual(self.main.ui.tabviewRecg.model().rowCount(), 2)
@@ -1358,16 +1388,17 @@ class DetectionBrowserContractTests(unittest.TestCase):
         self.assertEqual(self.main._active_worker_task, "detection")
         self.assertFalse(self.main.ui.detectionImageSelector.isEnabled())
 
-    def test_current_malformed_return_releases_close_wait_without_reading_result_content(self):
+    def test_current_incomplete_identity_is_rejected_during_close_wait(self):
         task = self.start()
         self.main.set_close_wait_pending(True)
         with patch.object(self.main, "_normalized_detection_runtime_payload",
                           side_effect=AssertionError("Closing must not decode a result")):
             self.main._on_detection_finished({"run_token": task.run_token,
                                               "job_token": task.job_token,
+                                              "regression_revision": task.regression_set.revision,
                                               "sample_results": object()})
-        self.assertEqual(self.main.worker_returns, [True])
-        self.assertIsNone(self.main._active_worker_task)
+        self.assertEqual(self.main.worker_returns, [])
+        self.assertEqual(self.main._active_worker_task, "detection")
         self.assertEqual(self.main._detection_image_results, {})
         self.assertEqual(len(self.main.requests), 1)
 
@@ -1400,6 +1431,10 @@ class DetectionBrowserContractTests(unittest.TestCase):
             },
             "selected_channel": "R", "elapsed_ms": 1.0, "warnings": [],
         }
+        operation = main._regression_session_state.begin_attempt(
+            DetectMain._regression_source_id(payload["source_path"])
+        )
+        payload["operation_token"] = operation.operation_token
         main._set_active_worker_task("regression")
         main._on_regression_finished(payload)
         self.assertIs(main._regression_result, payload)
@@ -1462,7 +1497,7 @@ class DetectionBrowserContractTests(unittest.TestCase):
             self.main.ui.pushButton_8.click()
         commit.assert_called_once()
         detection_commit.assert_not_called()
-        self.assertEqual(commit.call_args.args[0], ROOT / "HT-Detector_Peng" / "runs" /
+        self.assertEqual(commit.call_args.args[0], ROOT / "runs" /
                          "detect" / "results" / "linear")
         self.assert_linear_files(commit.call_args.args[1], payload)
         self.assertFalse(self.main._regression_dirty)
@@ -1520,6 +1555,36 @@ class DetectionBrowserContractTests(unittest.TestCase):
                 detection_commit.assert_not_called()
                 linear_commit.assert_not_called()
                 self.assertEqual(sum(r.dirty for r in self.main._detection_image_results.values()), 3)
+
+    def test_invalid_new_calibration_is_reported_and_keeps_identified_previous_revision(self):
+        previous = self.complete_linear_for_save()
+        previous_revision = previous["regression_set"].revision
+        invalid_formulas = {
+            channel: dict(formula)
+            for channel, formula in previous["formulas"].items()
+        }
+        invalid_formulas["G"]["slope"] = 0.0
+        invalid = dict(previous, formulas=invalid_formulas)
+        invalid.pop("regression_set", None)
+        operation = self.main._regression_session_state.begin_attempt(
+            DetectMain._regression_source_id(invalid["source_path"])
+        )
+        invalid["operation_token"] = operation.operation_token
+
+        self.main._set_active_worker_task("regression")
+        self.main._on_regression_finished(invalid)
+
+        self.assertIs(self.main._regression_result, previous)
+        self.assertEqual(
+            self.main._regression_result["regression_set"].revision,
+            previous_revision,
+        )
+        self.assertTrue(self.main.messages)
+        self.assertEqual(self.main.messages[-1][1], "Linear regression error")
+        self.assertIn(
+            "new regression result was not accepted",
+            self.main.messages[-1][2],
+        )
 
     def test_linear_save_cancel_keeps_both_result_types_dirty(self):
         self.complete_linear_for_save()
@@ -1874,10 +1939,12 @@ class DetectionStartupAndLayoutTests(unittest.TestCase):
                 self.assertTrue(self.main.ui.pushButton_8.isEnabled())
         self.assertEqual(len(self.requests), 2)
 
-    def test_valid_detection_without_browser_entries_survives_modes_and_refresh(self):
-        # Legacy Single result: no batch rows, but a valid payload and dirty flag.
+    def test_legacy_detection_without_authoritative_samples_survives_but_cannot_export(self):
+        # A legacy Single result can remain visible during a mode round-trip,
+        # but Phase 1B1 must not export it without authoritative SampleResults.
         image = np.full((12, 16, 3), (17, 28, 39), dtype=np.uint8)
         result = {"source_path": "Z:/qbatch-memory/legacy.png", "image": image,
+                  "display_channel": "R",
                   "targets": [{"No.": 1, "Con.": 0.5, "Red": 1., "Green": 2.,
                                "Blue": 3., "rgb_roi": (3, 3, 7, 7)}]}
         self.main._detection_result = result
@@ -1893,8 +1960,8 @@ class DetectionStartupAndLayoutTests(unittest.TestCase):
             self.main._refresh_detection_browser()
             self.main._update_save_button()
             self.assertEqual(self.main.ui.detectionImageSelector.count(), 0)
-            self.assertTrue(self.main._has_valid_detection_export())
-            self.assertTrue(self.main.ui.pushButton_8.isEnabled())
+            self.assertFalse(self.main._has_valid_detection_export())
+            self.assertFalse(self.main.ui.pushButton_8.isEnabled())
             self.main.set_linear_mode(detectmain.LINEAR_MODE_IMAGE_SERIES)
             self.main.ui.progressBar.setRange(0, 0)
             self.main.ui.lcdNumber.display(999)

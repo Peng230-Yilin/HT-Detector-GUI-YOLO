@@ -5,16 +5,18 @@ import unittest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-GUI_ROOT = PROJECT_ROOT / "Peng1.0_GUI"
+GUI_ROOT = PROJECT_ROOT
 sys.path.insert(0, str(GUI_ROOT))
 
 from batch_state import (  # noqa: E402
     BatchState,
+    ConcentrationStatus,
     ImageItem,
     ImageStatus,
     SampleError,
     SampleErrorType,
     SampleResult,
+    RegressionSet,
     assign_batch_numbers,
     assign_image_numbers,
     build_image_items,
@@ -22,6 +24,17 @@ from batch_state import (  # noqa: E402
     pair_cuvettes_and_liquids,
     sort_spatially,
 )
+
+
+def formula(slope=2.0, intercept=10.0):
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r": 0.9,
+        "R2": 0.81,
+        "p": 0.01,
+        "std_err": 0.1,
+    }
 
 
 def sample(x, y, image_order=1, source_file="image.png"):
@@ -104,6 +117,84 @@ class NaturalSortTests(unittest.TestCase):
         state.images.clear()
         with self.assertRaises(IndexError):
             _ = state.current_image
+
+
+class RegressionSetTests(unittest.TestCase):
+    def test_three_distinct_equations_and_inclusive_boundaries(self):
+        regression = RegressionSet.from_formulas(
+            {
+                "R": formula(2.0, 10.0),
+                "G": formula(4.0, 20.0),
+                "B": formula(-5.0, 100.0),
+            },
+            source_id="confirmed-run-1",
+            valid_ranges=(0.0, 10.0),
+        )
+        results = regression.calculate_all(10.0, 60.0, 50.0)
+        self.assertEqual(results["R"], (0.0, ConcentrationStatus.IN_RANGE))
+        self.assertEqual(results["G"], (10.0, ConcentrationStatus.IN_RANGE))
+        self.assertEqual(results["B"], (10.0, ConcentrationStatus.IN_RANGE))
+
+    def test_all_eight_statuses_have_fixed_semantics(self):
+        valid = RegressionSet.from_formulas(
+            {channel: formula() for channel in ("R", "G", "B")},
+            source_id="valid",
+            valid_ranges=(0.0, 10.0),
+        ).red
+        self.assertEqual(valid.calculate(20.0)[1], ConcentrationStatus.IN_RANGE)
+        self.assertEqual(valid.calculate(8.0)[1], ConcentrationStatus.BELOW_RANGE)
+        self.assertEqual(valid.calculate(32.0)[1], ConcentrationStatus.ABOVE_RANGE)
+
+        missing = RegressionSet.from_formulas({}, "missing").red
+        self.assertEqual(
+            missing.calculate(20.0),
+            (None, ConcentrationStatus.MISSING_REGRESSION),
+        )
+        zero = RegressionSet.from_formulas(
+            {"R": formula(0.0)}, "zero", valid_ranges=(0.0, 10.0)
+        ).red
+        self.assertEqual(zero.calculate(20.0), (None, ConcentrationStatus.INVALID_SLOPE))
+        invalid = RegressionSet.from_formulas(
+            {"R": {"slope": 2.0}}, "invalid", valid_ranges=(0.0, 10.0)
+        ).red
+        self.assertEqual(
+            invalid.calculate(20.0),
+            (None, ConcentrationStatus.INVALID_REGRESSION),
+        )
+        no_range = RegressionSet.from_formulas(
+            {"R": formula()}, "no-range"
+        ).red
+        self.assertEqual(
+            no_range.calculate(20.0),
+            (5.0, ConcentrationStatus.RANGE_UNAVAILABLE),
+        )
+        overflow = RegressionSet.from_formulas(
+            {"R": formula(1.0, -1e308)}, "overflow", valid_ranges=(0.0, 10.0)
+        ).red
+        self.assertEqual(
+            overflow.calculate(1e308),
+            (None, ConcentrationStatus.CALCULATION_FAILED),
+        )
+
+    def test_mixed_confirmed_sources_are_rejected(self):
+        first = RegressionSet.from_formulas(
+            {channel: formula() for channel in ("R", "G", "B")},
+            "first",
+            valid_ranges=(0.0, 1.0),
+        )
+        second = RegressionSet.from_formulas(
+            {channel: formula() for channel in ("R", "G", "B")},
+            "second",
+            valid_ranges=(0.0, 1.0),
+        )
+        with self.assertRaisesRegex(ValueError, "share one confirmed source"):
+            RegressionSet(
+                first.source_id,
+                first.red,
+                second.green,
+                first.blue,
+                first.revision,
+            )
 
 
 class SpatialSortTests(unittest.TestCase):

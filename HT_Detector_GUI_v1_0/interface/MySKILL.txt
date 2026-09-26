@@ -12,7 +12,7 @@ Detection Image 区域下面有一个进度条，设置为100%，Period里面的
 Table. Detection 区域的table存放路径为：./interface/detect/table/detection_table.xlsx
 
 
-主要修改的文件路径：C:\Users\yue\Desktop\newPeng\Peng1.0_GUI\detectmain.py
+主要修改的文件路径：C:\Users\yue\Desktop\newPeng\HT_Detector_GUI_v1_0\detectmain.py
 程序中包含5组关键数据，num代表数据列的个数，con代表浓度列的数据，green，blue，red或（rgb_G, rgb_B, rgb_R）列数据分别代表图像的绿色、蓝色和红色三个通道的数据。
 程序中包含了两种相近的数据，第一种是用来做线性回归的数据，包括num，con，green，blue，和red数据；第一种是用来做浓度预测的数据，包括num，con，green，blue，和red数据（可以忽略其中的浓度数据，需要用程序计算得出）；
 程序的主要功能是，根据给定数据，即做线性回归用的浓度值和对应的RGB数据，来计算出线性回归曲线，计算线性回归曲线时采用单个颜色通道数据和浓度来计算，x轴是浓度数据，y轴是单一的颜色通道数据（green，blue 或red三选一）。
@@ -37,7 +37,7 @@ Table. Linear Regression区域和Table. Detection 区域分别显示./interface/
 
 
 
-主要修改的文件路径：C:\Users\yue\Desktop\newPeng\Peng1.0_GUI\detectmain.py
+主要修改的文件路径：C:\Users\yue\Desktop\newPeng\HT_Detector_GUI_v1_0\detectmain.py
 第142和143行，修改为既可以导入png格式又可以导入jpg格式的图片。
 
 修改代码，使得Linear Regression Image 区域的Image和Detection Image 区域的Image在整个窗口调整的过程中，图片能等比例调整大小，并且能在不改变纵横比的条件下，填充满整个图片区域。
@@ -74,7 +74,7 @@ Table. Linear Regression区域和Table. Detection 区域分别显示./interface/
 
 
 
-主要修改的文件路径：C:\Users\yue\Desktop\newPeng\Peng1.0_GUI\detectmain.py
+主要修改的文件路径：C:\Users\yue\Desktop\newPeng\HT_Detector_GUI_v1_0\detectmain.py
 原程序第58-63行：
         num = [1, 2, 3, 4, 5]
         con = [1, 10, 20, 30, 40]

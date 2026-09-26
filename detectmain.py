@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QMainWindow, QFileDialog,QColorDialog, QComboBox,
 from PySide6.QtGui import (QAction, QGuiApplication, QIcon, QKeySequence, QStandardItemModel,
                             QStandardItem, QImage, QPixmap)
 from PySide6.QtCore import (QUrl, Qt, Slot, Signal, QDir, QEvent, QThread,
-                            QCoreApplication)
+                            QCoreApplication, QTimer)
 
 from PySide6.QtPrintSupport import (QAbstractPrintDialog, QPrinter,
                                     QPrintDialog, QPrintPreviewDialog)
@@ -38,7 +38,16 @@ from camera import Camera
 from interface_config import load_effective_settings
 from yolo_detection_worker import YoloDetectionWorker
 from batch_detection_controller import BatchDetectionController
-from batch_state import DetectionScope, ImageStatus, NumberingMode
+from batch_state import (
+    DetectionScope,
+    ImageStatus,
+    NumberingMode,
+    RegressionSet,
+    RegressionSessionState,
+    detection_export_identities,
+    detection_table_rows,
+    format_detection_duration,
+)
 from linear_series_controller import LinearSeriesController
 from linear_series_state import (
     LinearImageStatus,
@@ -49,24 +58,21 @@ from linear_series_state import (
 
 _USE_CURRENT_RESULT = object()
 GUI_RESOURCE_ROOT = Path(__file__).resolve().parent
-REPOSITORY_ROOT = GUI_RESOURCE_ROOT.parent
+REPOSITORY_ROOT = GUI_RESOURCE_ROOT
 LINEAR_IMPORT_DEFAULT_DIRECTORY = (
     REPOSITORY_ROOT
-    / "HT-Detector_Peng"
     / "custom"
     / "linear_detection"
     / "linear"
 )
 DETECTION_DEFAULT_DIRECTORY = (
     REPOSITORY_ROOT
-    / "HT-Detector_Peng"
     / "custom"
     / "linear_detection"
     / "detection"
 )
 LINEAR_WEIGHT_PATH = (
     REPOSITORY_ROOT
-    / "HT-Detector_Peng"
     / "weights"
     / "cuvette_Peng"
     / "yolov8n_train"
@@ -76,6 +82,19 @@ LINEAR_WEIGHT_PATH = (
 LINEAR_MODE_SINGLE_IMAGE = "single_image"
 LINEAR_MODE_IMAGE_SERIES = "image_series"
 _LINEAR_MODES = (LINEAR_MODE_SINGLE_IMAGE, LINEAR_MODE_IMAGE_SERIES)
+TIME_DISPLAY_NONE = "none"
+TIME_DISPLAY_LINEAR = "linear"
+TIME_DISPLAY_DETECTION = "detection"
+_TIME_DISPLAY_MODES = (
+    TIME_DISPLAY_NONE,
+    TIME_DISPLAY_LINEAR,
+    TIME_DISPLAY_DETECTION,
+)
+_TIME_DISPLAY_LABELS = {
+    TIME_DISPLAY_NONE: "Time (ms):",
+    TIME_DISPLAY_LINEAR: "Linear Time (ms):",
+    TIME_DISPLAY_DETECTION: "Detection Time (ms):",
+}
 
 
 def _dialog_initial_directory(preferred_directory):
@@ -129,12 +148,12 @@ class _SingleLinearViewState:
     last_calibration_directory: object
     progress_range: tuple
     progress_value: int
-    elapsed_value: object
+    time_display_mode: str
 
 
 class DetectMain(QWidget):
     detection_requested = Signal(str, str, object)
-    regression_requested = Signal(str, str)
+    regression_requested = Signal(str, str, object)
     linear_series_extraction_requested = Signal(str, str, object)
     clear_active_formulas_requested = Signal()
     install_saved_formulas_requested = Signal(object)
@@ -148,12 +167,15 @@ class DetectMain(QWidget):
         super().__init__()
         self.ui = ui_detectmain.Ui_Form()
         self.ui.setupUi(self)
+        self._time_display_mode = TIME_DISPLAY_NONE
+        DetectMain._set_shared_time_display(self, TIME_DISPLAY_NONE, None)
         self._install_resizable_splitters()
 
         self._calibration_source_path = None
         self._calibration_source_image = None
         self._regression_result = None
         self._regression_dirty = False
+        self._regression_session_state = RegressionSessionState()
         self._linear_mode = LINEAR_MODE_SINGLE_IMAGE
         self._single_linear_action_text = self.ui.pushButton_4.text()
         self._single_linear_view_state = None
@@ -178,6 +200,16 @@ class DetectMain(QWidget):
         self._camera_shutdown_complete = False
         self._shutdown_ready_emitted = False
         self._batch_controller = BatchDetectionController()
+        self._detection_duration_timer = QTimer(self)
+        self._detection_duration_timer.setInterval(50)
+        self._detection_duration_timer.timeout.connect(
+            self._refresh_detection_duration_display
+        )
+        self._linear_duration_timer = QTimer(self)
+        self._linear_duration_timer.setInterval(50)
+        self._linear_duration_timer.timeout.connect(
+            self._refresh_linear_duration_display
+        )
         self._detection_weight_path = None
         self._install_detection_browser()
 
@@ -334,7 +366,9 @@ class DetectMain(QWidget):
         # A new instance has no Detection result. Establish the empty view and
         # shared indicators before capturing any initial result-pane snapshot.
         self._populate_tableview(
-            self.ui.tabviewRecg, ["No.", "Con.", "Red", "Green", "Blue"], []
+            self.ui.tabviewRecg,
+            self.CALIBRATION_TABLE_HEADERS,
+            [],
         )
         self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
@@ -350,7 +384,8 @@ class DetectMain(QWidget):
         self.ui.labelRecgImg.setText("No Detection result yet.")
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(0)
-        self.ui.lcdNumber.display(0)
+        self.ui.lcdNumber.setDigitCount(10)
+        self.ui.lcdNumber.display("")
         for lbl in (self.ui.labelOrigImg, self.ui.labelRecgImg):
             lbl.setMinimumSize(1, 1)
             lbl.setAlignment(Qt.AlignCenter)
@@ -431,10 +466,16 @@ class DetectMain(QWidget):
         "standard_curve.png",
         "calibration_annotated.png",
     )
-    DETECTION_TABLE_HEADERS = (
-        "Name", "No.", "Con.", "Red", "Green", "Blue", None,
-        "x0_con", "y0_con", "x1_con", "y1_con", "w_con", "h_con",
+    DETECTION_IDENTITY_HEADERS = (
+        "Image Order", "Source File", "No. in Image", "Batch No.",
     )
+    DETECTION_RESULT_HEADERS = (
+        "R", "G", "B", "Con.R", "Con.G", "Con.B",
+        "Status.R", "Status.G", "Status.B", None,
+        "x0_con", "y0_con", "x1_con", "y1_con", "w_con", "h_con",
+        "Detection Time (ms)",
+    )
+    DETECTION_TABLE_HEADERS = DETECTION_IDENTITY_HEADERS + DETECTION_RESULT_HEADERS
     MAX_DETECTION_STEM_LENGTH = 100
 
     @staticmethod
@@ -497,6 +538,7 @@ class DetectMain(QWidget):
         )
         self._show_calibration_plot_placeholder()
         self.ui.pushButton_7.setEnabled(False)
+        DetectMain._set_shared_time_display(self, TIME_DISPLAY_NONE, None)
         self._update_save_button()
 
     def _clear_detection_results_for_new_run(self):
@@ -505,7 +547,7 @@ class DetectMain(QWidget):
         self._detection_dirty = False
         if self._last_completed_result_type == "detection":
             self._last_completed_result_type = None
-        headers = ["No.", "Con.", "Red", "Green", "Blue"]
+        headers = list(self.CALIBRATION_TABLE_HEADERS)
         model = self._build_table_model(headers, [])
         DetectMain._publish_detection_result_view(
             self, None, model
@@ -517,6 +559,7 @@ class DetectMain(QWidget):
             self.ui.tabviewRecg.horizontalHeader().setSectionResizeMode(
                 QHeaderView.Stretch
             )
+        DetectMain._refresh_detection_duration_display(self)
         self._update_save_button()
 
     def _install_detection_browser(self):
@@ -646,8 +689,16 @@ class DetectMain(QWidget):
         record = self._detection_image_results.get(key)
         successful = image.status == ImageStatus.COMPLETED and record is not None
         result = record.payload if successful else None
-        headers = ["No.", "Con.", "Red", "Green", "Blue"]
-        rows = [tuple(target[h] for h in headers) for target in result["targets"]] if result else []
+        headers = list(self.CALIBRATION_TABLE_HEADERS)
+        rows = (
+            detection_table_rows(
+                image,
+                self._batch_controller.state.numbering_mode,
+                result["display_channel"],
+            )
+            if result
+            else []
+        )
         model = self._build_table_model(headers, rows)
         pixmap = self._bgr_image_to_pixmap(record.payload["image"]) if record else None
         status, tooltip = DetectMain._detection_image_description(self, image)
@@ -658,8 +709,102 @@ class DetectMain(QWidget):
         DetectMain._publish_detection_result_view(
             self, pixmap, model, "" if pixmap is not None else status, tooltip
         )
+        DetectMain._refresh_detection_duration_display(self, image)
         DetectMain._refresh_detection_browser(self)
         self._update_save_button()
+
+    @Slot()
+    def _refresh_detection_duration_display(self, image=None):
+        controller = self._batch_controller
+        elapsed_ms = controller.active_elapsed_ms
+        if elapsed_ms is not None:
+            DetectMain._set_shared_time_display(
+                self, TIME_DISPLAY_DETECTION, elapsed_ms
+            )
+            return
+
+        timer = getattr(self, "_detection_duration_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        if image is None:
+            selected_key = getattr(self, "_detection_selected_key", None)
+            if isinstance(selected_key, tuple) and len(selected_key) == 3:
+                image = next((
+                    candidate for candidate in controller.state.images
+                    if candidate.image_order == selected_key[1]
+                    and candidate.path == selected_key[2]
+                ), None)
+            elif controller.state.images:
+                image = controller.state.current_image
+        duration_ms = None if image is None else image.detection_duration_ms
+        DetectMain._set_shared_time_display(
+            self, TIME_DISPLAY_DETECTION, duration_ms
+        )
+
+    def _set_shared_time_display(self, mode, duration_ms):
+        if mode not in _TIME_DISPLAY_MODES:
+            raise ValueError("Unknown time display mode: {}".format(mode))
+        value = format_detection_duration(duration_ms)
+        self._time_display_mode = mode
+        ui = getattr(self, "ui", None)
+        label = getattr(ui, "label_9", None)
+        display = getattr(ui, "lcdNumber", None)
+        if label is not None:
+            label.setText(_TIME_DISPLAY_LABELS[mode])
+        if display is not None:
+            display.display(value)
+
+    def _refresh_shared_time_display(self):
+        mode = getattr(self, "_time_display_mode", TIME_DISPLAY_NONE)
+        if mode == TIME_DISPLAY_LINEAR:
+            DetectMain._refresh_linear_duration_display(self)
+        elif mode == TIME_DISPLAY_DETECTION:
+            DetectMain._refresh_detection_duration_display(self)
+        else:
+            DetectMain._set_shared_time_display(self, TIME_DISPLAY_NONE, None)
+
+    @staticmethod
+    def _regression_source_id(source_path):
+        return "runtime-calibration:{}".format(str(source_path))
+
+    @Slot()
+    def _refresh_linear_duration_display(self):
+        if (
+            getattr(self, "_linear_mode", LINEAR_MODE_SINGLE_IMAGE)
+            != LINEAR_MODE_SINGLE_IMAGE
+        ):
+            DetectMain._set_shared_time_display(self, TIME_DISPLAY_NONE, None)
+            return
+
+        session = DetectMain._regression_session(self)
+        elapsed_ms = session.active_elapsed_ms
+        if elapsed_ms is not None:
+            DetectMain._set_shared_time_display(
+                self, TIME_DISPLAY_LINEAR, elapsed_ms
+            )
+            return
+
+        timer = getattr(self, "_linear_duration_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        source_path = getattr(self, "_calibration_source_path", None)
+        result = getattr(self, "_regression_result", None)
+        duration_ms = None
+        if source_path and isinstance(result, dict):
+            try:
+                regression_set = DetectMain._regression_set_from_result(result)
+            except (TypeError, ValueError):
+                regression_set = None
+            if (
+                regression_set is not None
+                and regression_set.source_id
+                == DetectMain._regression_source_id(source_path)
+            ):
+                timing = session.timing_for(regression_set)
+                duration_ms = None if timing is None else timing.duration_ms
+        DetectMain._set_shared_time_display(
+            self, TIME_DISPLAY_LINEAR, duration_ms
+        )
 
     def _detection_run_counts(self):
         images = self._batch_controller.state.images
@@ -681,30 +826,24 @@ class DetectMain(QWidget):
             text += " | Target: " + target.original_filename
         return text
 
-    def _detection_result_matches(self, payload, require_source=False):
+    def _detection_result_matches(self, payload, require_samples=False):
         if not isinstance(payload, dict):
-            return False
-        if any(type(payload.get(name)) is not int for name in ("run_token", "job_token")):
             return False
         if not self._batch_controller.matches_active_result(payload):
             return False
         task = self._batch_controller.active_job
-        # Detection failures currently carry tokens only. Validate all additional
-        # identity fields when supplied, and require the worker's path on success.
-        if require_source and payload.get("source_path") != task.path:
-            return False
-        for name, expected in (("source_path", task.path), ("normalized_path", task.path),
-                               ("image_order", task.image_order), ("source_file", task.source_file)):
-            if name in payload and (type(payload[name]) is not type(expected) or payload[name] != expected):
-                return False
-        for name in (("sample_results", "sample_errors") if require_source else ()):
-            values = payload.get(name, [])
-            if isinstance(values, list):
+        if require_samples:
+            for name in ("sample_results", "sample_errors"):
+                values = payload.get(name)
+                if not isinstance(values, list):
+                    return False
                 for value in values:
-                    if isinstance(value, dict) and (
-                        type(value.get("image_order")) is not int
+                    if (
+                        not isinstance(value, dict)
+                        or type(value.get("image_order")) is not int
                         or value["image_order"] != task.image_order
-                        or value.get("source_file") != task.source_file
+                        or type(value.get("source_file")) is not str
+                        or value["source_file"] != task.source_file
                     ):
                         return False
         return True
@@ -722,6 +861,149 @@ class DetectMain(QWidget):
         if path.is_dir():
             raise ValueError("The {} source path identifies a directory.".format(description))
         return source_path
+
+    @classmethod
+    def _regression_set_from_result(cls, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("No confirmed regression result is available.")
+        source_path = cls._validated_source_path(
+            payload.get("source_path"), "regression"
+        )
+        formulas = payload.get("formulas")
+        if not isinstance(formulas, dict):
+            raise ValueError("The regression result has no formula set.")
+        samples = payload.get("samples")
+        if not isinstance(samples, list):
+            raise ValueError("The regression result has no calibration samples.")
+        included = []
+        for index, sample in enumerate(samples, start=1):
+            if not isinstance(sample, dict):
+                raise ValueError("Regression sample {} is invalid.".format(index))
+            if sample.get("included") is True:
+                value = sample.get("Con.")
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError(
+                        "Regression sample {} concentration is invalid.".format(index)
+                    )
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(
+                        "Regression sample {} concentration is not finite.".format(index)
+                    )
+                included.append(value)
+        if len(included) < 2 or len(set(included)) < 2:
+            raise ValueError(
+                "At least two distinct included concentrations are required."
+            )
+        source_id = cls._regression_source_id(source_path)
+        regression_set = RegressionSet.from_formulas(
+            formulas,
+            source_id=source_id,
+            valid_ranges=(min(included), max(included)),
+        )
+        supplied = payload.get("regression_set")
+        if supplied is not None and supplied != regression_set:
+            raise ValueError(
+                "The regression result does not match its cohesive R/G/B snapshot."
+            )
+        return regression_set
+
+    @classmethod
+    def _load_saved_regression_set(cls, formula_path=None):
+        formula_path = (
+            Path(__file__).resolve().parent
+            / "runs" / "detect" / "results" / "linear" / "linear_con_rgb.xlsx"
+            if formula_path is None
+            else Path(formula_path)
+        )
+        source_id = "saved-linear:{}".format(str(formula_path))
+        if not formula_path.is_file():
+            return RegressionSet.missing(source_id)
+
+        try:
+            workbook = openpyxl.load_workbook(
+                formula_path, read_only=True, data_only=True
+            )
+        except Exception as error:
+            raise ValueError(
+                "The confirmed regression workbook could not be opened: {}".format(error)
+            ) from error
+        try:
+            if workbook.sheetnames != ["Sheet1"]:
+                raise ValueError(
+                    "The confirmed regression workbook must contain only Sheet1."
+                )
+            worksheet = workbook["Sheet1"]
+            expected = ("Channel",) + cls.FORMULA_FIELDS
+            headers = tuple(
+                worksheet.cell(1, column).value for column in range(8, 15)
+            )
+            if headers != expected:
+                raise ValueError(
+                    "The confirmed regression headers H1:N1 are invalid."
+                )
+
+            formulas = {}
+            for row in range(2, worksheet.max_row + 1):
+                channel = worksheet.cell(row, 8).value
+                values = tuple(
+                    worksheet.cell(row, column).value for column in range(9, 15)
+                )
+                if channel is None and all(value is None for value in values):
+                    continue
+                if channel not in cls.FORMULA_CHANNELS:
+                    raise ValueError(
+                        "The confirmed regression contains an invalid channel at row {}.".format(row)
+                    )
+                if channel in formulas:
+                    raise ValueError(
+                        "The confirmed regression contains duplicate channel {}.".format(channel)
+                    )
+                formulas[channel] = dict(zip(cls.FORMULA_FIELDS, values))
+
+            included = []
+            for row in range(2, worksheet.max_row + 1):
+                if worksheet.cell(row, 6).value is not True:
+                    continue
+                value = worksheet.cell(row, 2).value
+                if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                    raise ValueError(
+                        "The confirmed regression concentration at row {} is invalid.".format(row)
+                    )
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(
+                        "The confirmed regression concentration at row {} is not finite.".format(row)
+                    )
+                included.append(value)
+        finally:
+            workbook.close()
+
+        valid_range = (
+            (min(included), max(included))
+            if len(included) >= 2 and len(set(included)) >= 2
+            else None
+        )
+        return RegressionSet.from_formulas(
+            formulas, source_id=source_id, valid_ranges=valid_range
+        )
+
+    def _regression_session(self):
+        session = getattr(self, "_regression_session_state", None)
+        if session is None:
+            session = RegressionSessionState()
+            current = getattr(self, "_regression_result", None)
+            if isinstance(current, dict):
+                try:
+                    session.activate(self._regression_set_from_result(current))
+                except (TypeError, ValueError):
+                    pass
+            self._regression_session_state = session
+        return session
+
+    def _regression_set_for_detection(self):
+        session = DetectMain._regression_session(self)
+        return session.regression_for_detection(self._load_saved_regression_set)
 
     def _validated_linear_export_payload(self, payload=_USE_CURRENT_RESULT):
         if payload is _USE_CURRENT_RESULT:
@@ -793,12 +1075,18 @@ class DetectMain(QWidget):
         selected_channel = payload.get("selected_channel")
         if selected_channel not in self.FORMULA_CHANNELS:
             raise ValueError("The selected regression channel is invalid.")
+        regression_set = self._regression_set_from_result(payload)
+        timing = DetectMain._regression_session(self).timing_for(regression_set)
         return {
             "source_path": source_path,
             "image": image,
             "samples": validated_samples,
             "formulas": validated_formulas,
             "selected_channel": selected_channel,
+            "regression_set": regression_set,
+            "linear_duration_ms": (
+                None if timing is None else timing.duration_ms
+            ),
         }
 
     def _has_valid_linear_export(self):
@@ -912,7 +1200,7 @@ class DetectMain(QWidget):
             raise ValueError("Detection targets must be a list.")
 
         normalized_targets = []
-        numeric_fields = ("No.", "Con.", "Red", "Green", "Blue")
+        numeric_fields = ("No.", "Red", "Green", "Blue")
         for index, target in enumerate(targets, start=1):
             if not isinstance(target, dict):
                 raise ValueError("Detection target {} is invalid.".format(index))
@@ -924,6 +1212,17 @@ class DetectMain(QWidget):
                 if not math.isfinite(float(value)):
                     raise ValueError("Detection target {} field {} must be finite.".format(index, field))
                 normalized[field] = value
+            concentration = target.get("Con.")
+            if concentration is not None:
+                if (
+                    isinstance(concentration, bool)
+                    or not isinstance(concentration, numbers.Real)
+                    or not math.isfinite(float(concentration))
+                ):
+                    raise ValueError(
+                        "Detection target {} field Con. must be finite or empty.".format(index)
+                    )
+            normalized["Con."] = concentration
             roi = target.get("rgb_roi")
             if not isinstance(roi, (tuple, list)) or len(roi) != 4:
                 raise ValueError("Detection target {} rgb_roi is invalid.".format(index))
@@ -958,6 +1257,9 @@ class DetectMain(QWidget):
         sample_results = payload.get("sample_results", [])
         sample_errors = payload.get("sample_errors", [])
         warnings = payload.get("warnings", [])
+        display_channel = payload.get("display_channel")
+        if display_channel not in DetectMain.FORMULA_CHANNELS:
+            raise ValueError("Detection display_channel must be R, G, or B.")
         for name, values in (
             ("sample_results", sample_results),
             ("sample_errors", sample_errors),
@@ -978,6 +1280,7 @@ class DetectMain(QWidget):
             "sample_results": [dict(value) for value in sample_results],
             "sample_errors": [dict(value) for value in sample_errors],
             "warnings": list(warnings),
+            "display_channel": display_channel,
         })
         return normalized
 
@@ -992,17 +1295,35 @@ class DetectMain(QWidget):
         if not normalized["targets"]:
             raise ValueError("At least one valid detection target is required.")
 
-        validated_targets = [
-            {
-                "No.": target["No."],
-                "Con.": target["Con."],
-                "Red": target["Red"],
-                "Green": target["Green"],
-                "Blue": target["Blue"],
-                "rgb_roi": target["rgb_roi"],
-            }
-            for target in normalized["targets"]
-        ]
+        image_item = DetectMain._selected_detection_image_for_export(
+            self, normalized["source_path"]
+        )
+        identities = detection_export_identities(image_item)
+        if len(identities) != len(image_item.samples):
+            raise ValueError(
+                "Detection export identity count does not match the authoritative sample count."
+            )
+
+        validated_targets = []
+        for identity, sample in zip(identities, image_item.samples):
+            if sample.roi_box is None or len(sample.roi_box) != 4:
+                raise ValueError("An authoritative Detection sample has an invalid ROI.")
+            validated_targets.append({
+                "image_order": identity.image_order,
+                "source_file": identity.original_filename,
+                "no_in_image": identity.no_in_image,
+                "batch_no": identity.batch_no,
+                "R": sample.red,
+                "G": sample.green,
+                "B": sample.blue,
+                "Con.R": sample.con_r,
+                "Con.G": sample.con_g,
+                "Con.B": sample.con_b,
+                "Status.R": sample.status_r.value,
+                "Status.G": sample.status_g.value,
+                "Status.B": sample.status_b.value,
+                "rgb_roi": sample.roi_box,
+            })
         source_path = normalized["source_path"]
         return {
             "source_path": source_path,
@@ -1010,7 +1331,34 @@ class DetectMain(QWidget):
             "safe_stem": self._safe_detection_stem(source_path),
             "image": normalized["image"],
             "targets": validated_targets,
+            "detection_duration_ms": image_item.detection_duration_ms,
         }
+
+    def _selected_detection_image_for_export(self, source_path):
+        controller = getattr(self, "_batch_controller", None)
+        if controller is None:
+            raise ValueError("Detection batch state is unavailable for export.")
+        state = controller.state
+        if getattr(self, "_detection_cache_state", None) is not state:
+            raise ValueError("The selected Detection result does not belong to the current batch.")
+
+        selected_key = getattr(self, "_detection_selected_key", None)
+        if not isinstance(selected_key, tuple) or len(selected_key) != 3:
+            raise ValueError("No authoritative Detection image is selected for export.")
+        run_token, image_order, selected_path = selected_key
+        if run_token != getattr(self, "_detection_cache_run_token", None):
+            raise ValueError("The selected Detection result belongs to a stale run.")
+        if isinstance(image_order, bool) or not isinstance(image_order, int):
+            raise ValueError("The selected Detection image order is invalid.")
+
+        image_item = next(
+            (image for image in state.images if image.image_order == image_order), None
+        )
+        if image_item is None or image_item.path != selected_path:
+            raise ValueError("The selected Detection image is not present in the current batch.")
+        if source_path != image_item.path:
+            raise ValueError("The Detection result source does not match the selected batch image.")
+        return image_item
 
     def _has_valid_detection_export(self):
         try:
@@ -1037,14 +1385,24 @@ class DetectMain(QWidget):
                 worksheet.cell(1, column, header)
         for row_index, target in enumerate(export_payload["targets"], start=2):
             x0, y0, x1, y1 = target["rgb_roi"]
+            duration_ms = export_payload["detection_duration_ms"]
             values = (
-                export_payload["source_stem"], target["No."], target["Con."],
-                target["Red"], target["Green"], target["Blue"], None,
+                target["image_order"], target["source_file"],
+                target["no_in_image"], target["batch_no"],
+                target["R"], target["G"], target["B"],
+                target["Con.R"], target["Con.G"], target["Con.B"],
+                target["Status.R"], target["Status.G"], target["Status.B"], None,
                 x0, y0, x1, y1, x1 - x0, y1 - y0,
+                duration_ms,
             )
             for column, value in enumerate(values, start=1):
                 if value is not None:
-                    worksheet.cell(row_index, column, value)
+                    cell = worksheet.cell(row_index, column, value)
+                    if isinstance(value, str):
+                        cell.data_type = "s"
+            worksheet.cell(
+                row_index, len(cls.DETECTION_TABLE_HEADERS)
+            ).number_format = "0"
         buffer = io.BytesIO()
         workbook.save(buffer)
         workbook.close()
@@ -1061,26 +1419,52 @@ class DetectMain(QWidget):
                 )
             return actual == expected
 
-        workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), read_only=True, data_only=True)
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(workbook_bytes), read_only=False, data_only=False
+        )
         try:
             if workbook.sheetnames != ["Sheet1"]:
                 raise ValueError("The detection workbook must contain only Sheet1.")
             worksheet = workbook["Sheet1"]
-            headers = tuple(worksheet.cell(1, column).value for column in range(1, 14))
+            column_count = len(cls.DETECTION_TABLE_HEADERS)
+            headers = tuple(
+                worksheet.cell(1, column).value for column in range(1, column_count + 1)
+            )
             if headers != cls.DETECTION_TABLE_HEADERS:
-                raise ValueError("The detection workbook headers A1:M1 are invalid.")
+                raise ValueError("The detection workbook headers are invalid.")
             for row_index, target in enumerate(export_payload["targets"], start=2):
                 x0, y0, x1, y1 = target["rgb_roi"]
+                duration_ms = export_payload["detection_duration_ms"]
                 expected = (
-                    export_payload["source_stem"], target["No."], target["Con."],
-                    target["Red"], target["Green"], target["Blue"], None,
+                    target["image_order"], target["source_file"],
+                    target["no_in_image"], target["batch_no"],
+                    target["R"], target["G"], target["B"],
+                    target["Con.R"], target["Con.G"], target["Con.B"],
+                    target["Status.R"], target["Status.G"], target["Status.B"], None,
                     x0, y0, x1, y1, x1 - x0, y1 - y0,
+                    duration_ms,
                 )
-                actual = tuple(worksheet.cell(row_index, column).value for column in range(1, 14))
+                actual = tuple(
+                    worksheet.cell(row_index, column).value
+                    for column in range(1, column_count + 1)
+                )
                 if not all(values_match(value, wanted) for value, wanted in zip(actual, expected)):
                     raise ValueError("Detection workbook row {} does not match the payload.".format(row_index))
-                if worksheet.cell(row_index, 7).value is not None:
-                    raise ValueError("Detection workbook column G must remain empty.")
+                separator_column = cls.DETECTION_TABLE_HEADERS.index(None) + 1
+                if worksheet.cell(row_index, separator_column).value is not None:
+                    raise ValueError("The Detection workbook separator column must remain empty.")
+                duration_cell = worksheet.cell(
+                    row_index, len(cls.DETECTION_TABLE_HEADERS)
+                )
+                if duration_cell.number_format != "0":
+                    raise ValueError(
+                        "Detection Time must use the 0 number format."
+                    )
+                source_cell = worksheet.cell(row_index, 2)
+                if source_cell.value != target["source_file"] or source_cell.data_type != "s":
+                    raise ValueError(
+                        "Detection Source File must be an exact non-formula string."
+                    )
         finally:
             workbook.close()
 
@@ -1204,8 +1588,8 @@ class DetectMain(QWidget):
             self._update_save_button()
             QMessageBox.critical(self, "Save Detection error", str(error))
             return
-        repository_root = Path(__file__).resolve().parent.parent
-        target_directory = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results" / "detection"
+        repository_root = Path(__file__).resolve().parent
+        target_directory = repository_root / "runs" / "detect" / "results" / "detection"
         selected_record = DetectMain._selected_detection_record(self)
         self._set_active_worker_task("save_detection")
         try:
@@ -1280,6 +1664,12 @@ class DetectMain(QWidget):
             worksheet.cell(row_index, 8, channel)
             for column, field in enumerate(cls.FORMULA_FIELDS, start=9):
                 worksheet.cell(row_index, column, export_payload["formulas"][channel][field])
+        worksheet.cell(1, 15, "Linear Time (ms)")
+        duration_ms = export_payload["linear_duration_ms"]
+        for row_index in range(2, len(export_payload["samples"]) + 2):
+            if duration_ms is not None:
+                worksheet.cell(row_index, 15, duration_ms)
+            worksheet.cell(row_index, 15).number_format = "0"
 
         buffer = io.BytesIO()
         workbook.save(buffer)
@@ -1301,7 +1691,9 @@ class DetectMain(QWidget):
                 )
             return actual == expected
 
-        workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), read_only=True, data_only=True)
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(workbook_bytes), read_only=False, data_only=False
+        )
         try:
             if workbook.sheetnames != ["Sheet1"]:
                 raise ValueError("The exported workbook must contain only Sheet1.")
@@ -1314,6 +1706,8 @@ class DetectMain(QWidget):
             formula_headers = tuple(worksheet.cell(1, column).value for column in range(8, 15))
             if formula_headers != ("Channel",) + cls.FORMULA_FIELDS:
                 raise ValueError("The exported formula headers H1:N1 are invalid.")
+            if worksheet.cell(1, 15).value != "Linear Time (ms)":
+                raise ValueError("The exported Linear Time header O1 is invalid.")
             for row_index in range(1, max(len(export_payload["samples"]) + 1, 4) + 1):
                 if worksheet.cell(row_index, 7).value is not None:
                     raise ValueError("Column G must remain empty.")
@@ -1324,6 +1718,16 @@ class DetectMain(QWidget):
                     raise ValueError("The exported sample row {} does not match the payload.".format(row_index))
                 if worksheet.cell(row_index, 7).value is not None:
                     raise ValueError("Column G must remain empty.")
+                duration_cell = worksheet.cell(row_index, 15)
+                if not values_match(
+                    duration_cell.value, export_payload["linear_duration_ms"]
+                ):
+                    raise ValueError(
+                        "The exported Linear Time row {} does not match the authority."
+                        .format(row_index)
+                    )
+                if duration_cell.number_format != "0":
+                    raise ValueError("Linear Time must use the 0 number format.")
             for row_index, channel in enumerate(cls.FORMULA_CHANNELS, start=2):
                 actual = tuple(worksheet.cell(row_index, column).value for column in range(8, 15))
                 wanted = (channel,) + tuple(export_payload["formulas"][channel][field] for field in cls.FORMULA_FIELDS)
@@ -1442,8 +1846,8 @@ class DetectMain(QWidget):
             QMessageBox.critical(self, "Save Linear error", str(error))
             return
 
-        repository_root = Path(__file__).resolve().parent.parent
-        target_directory = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results" / "linear"
+        repository_root = Path(__file__).resolve().parent
+        target_directory = repository_root / "runs" / "detect" / "results" / "linear"
         existing = [name for name in self.LINEAR_EXPORT_FILENAMES if (target_directory / name).exists()]
         if existing:
             answer = QMessageBox.question(
@@ -1572,6 +1976,8 @@ class DetectMain(QWidget):
             QMessageBox.critical(self, "Plot error", str(error))
             return
 
+        DetectMain._refresh_linear_duration_display(self)
+
         used_x = [sample[0] for sample in included]
         used_y = [sample[1] for sample in included]
         color = self.CHANNEL_COLORS[channel_field]
@@ -1664,7 +2070,9 @@ class DetectMain(QWidget):
                 self.ui.progressBar.maximum(),
             ),
             progress_value=self.ui.progressBar.value(),
-            elapsed_value=self.ui.lcdNumber.value(),
+            time_display_mode=getattr(
+                self, "_time_display_mode", TIME_DISPLAY_NONE
+            ),
         )
 
     def _restore_single_linear_view(self, view_state=None):
@@ -1696,7 +2104,8 @@ class DetectMain(QWidget):
                 self._show_calibration_plot_placeholder()
         self.ui.progressBar.setRange(*state.progress_range)
         self.ui.progressBar.setValue(state.progress_value)
-        self.ui.lcdNumber.display(state.elapsed_value)
+        self._time_display_mode = state.time_display_mode
+        DetectMain._refresh_shared_time_display(self)
 
     def _capture_result_pane_view(self):
         label = getattr(self.ui, "labelRecgImg", None)
@@ -1818,8 +2227,10 @@ class DetectMain(QWidget):
     def _apply_linear_mode_controls(self):
         if self._linear_mode == LINEAR_MODE_IMAGE_SERIES:
             self.ui.pushButton_4.setText("Extract Series")
+            DetectMain._set_shared_time_display(self, TIME_DISPLAY_NONE, None)
         else:
             self.ui.pushButton_4.setText(self._single_linear_action_text)
+            DetectMain._refresh_shared_time_display(self)
         self._set_active_worker_task(self._active_worker_task)
 
     def set_linear_mode(self, mode):
@@ -2644,10 +3055,9 @@ class DetectMain(QWidget):
                 "The calibration image was not found:\n{}".format(calibration_path),
             )
             return
-        repository_root = Path(__file__).resolve().parent.parent
+        repository_root = Path(__file__).resolve().parent
         weight_path = (
             repository_root
-            / "HT-Detector_Peng"
             / "weights"
             / "cuvette_Peng"
             / "yolov8n_train"
@@ -2671,11 +3081,41 @@ class DetectMain(QWidget):
             )
             return
 
-        self.ui.progressBar.setRange(0, 0)
-        self._set_active_worker_task("regression")
-        self.regression_requested.emit(
-            self._calibration_source_path, str(weight_path)
+        regression_session = DetectMain._regression_session(self)
+        source_id = DetectMain._regression_source_id(
+            self._calibration_source_path
         )
+        operation = None
+        try:
+            operation = regression_session.begin_attempt(source_id)
+            self.ui.progressBar.setRange(0, 0)
+            self._set_active_worker_task("regression")
+            timer = getattr(self, "_linear_duration_timer", None)
+            if timer is not None:
+                timer.start()
+            DetectMain._refresh_linear_duration_display(self)
+            self.regression_requested.emit(
+                self._calibration_source_path,
+                str(weight_path),
+                operation.operation_token,
+            )
+        except Exception as error:
+            if operation is not None:
+                regression_session.accept_failure(
+                    operation.source_id,
+                    operation.operation_token,
+                )
+                timer = getattr(self, "_linear_duration_timer", None)
+                if timer is not None:
+                    timer.stop()
+                DetectMain._refresh_linear_duration_display(self)
+                self._set_active_worker_task(None)
+            self._show_message_safely(
+                QMessageBox.critical,
+                self,
+                "Linear regression error",
+                "Linear Regression was not dispatched.\n{}".format(error),
+            )
 
     @Slot()
     def _select_detection_image(self):
@@ -2703,10 +3143,9 @@ class DetectMain(QWidget):
         if not image_paths:
             return
 
-        repository_root = Path(__file__).resolve().parent.parent
+        repository_root = Path(__file__).resolve().parent
         weight_path = (
             repository_root
-            / "HT-Detector_Peng"
             / "weights"
             / "cuvette_Peng"
             / "yolov8n_train"
@@ -2721,45 +3160,74 @@ class DetectMain(QWidget):
             )
             return
 
+        try:
+            regression_set = self._regression_set_for_detection()
+        except (OSError, RuntimeError, ValueError) as error:
+            QMessageBox.critical(
+                self,
+                "Detection regression error",
+                "Detection was not started because the confirmed R/G/B regression "
+                "snapshot is invalid.\n{}".format(error),
+            )
+            return
+
         self.ui.progressBar.setRange(0, 100)
         self.ui.progressBar.setValue(0)
         self.ui.progressBar.setRange(0, 0)
         self._batch_controller.replace_images(image_paths)
         self._detection_weight_path = str(weight_path)
-        task = self._batch_controller.begin()
+        task = self._batch_controller.begin(regression_set)
         if task is None:
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
             return
         self._clear_detection_results_for_new_run()
-        self._set_active_worker_task("detection")
         self._dispatch_detection_task(task)
 
     def _dispatch_detection_task(self, task):
-        if task is None:
-            self._finish_detection_run()
+        while task is not None:
+            context, rejection = self._batch_controller.prepare_dispatch_context(
+                task, YoloDetectionWorker.lock_detection_context
+            )
+            if rejection is not None:
+                task = self._batch_controller.next_task()
+                continue
+
+            DetectMain._ensure_detection_run(self)
+            description = DetectMain._detection_run_description(self)
+            if getattr(self.ui, "detectionImageSelector", None) is not None:
+                DetectMain._show_detection_image(
+                    self, self.batch_state.current_image, select_for_save=False
+                )
+            counts = DetectMain._detection_run_counts(self)
+            self.ui.progressBar.setRange(0, counts["planned"])
+            self.ui.progressBar.setValue(counts["completed"])
+            self.detection_status_changed.emit(
+                "Detecting {}/{}: {} | {}".format(
+                    self._detection_planned_orders.index(task.image_order) + 1,
+                    counts["planned"], task.source_file, description,
+                )
+            )
+            self._set_active_worker_task("detection")
+            self._batch_controller.start_dispatch_timer(task)
+            timer = getattr(self, "_detection_duration_timer", None)
+            if timer is not None:
+                timer.start()
+            DetectMain._refresh_detection_duration_display(
+                self, self.batch_state.current_image
+            )
+            self.detection_requested.emit(
+                task.path, self._detection_weight_path, context
+            )
             return
-        DetectMain._ensure_detection_run(self)
-        description = DetectMain._detection_run_description(self)
-        if getattr(self.ui, "detectionImageSelector", None) is not None:
-            DetectMain._show_detection_image(self, self.batch_state.current_image, select_for_save=False)
-        counts = DetectMain._detection_run_counts(self)
-        self.ui.progressBar.setRange(0, counts["planned"])
-        self.ui.progressBar.setValue(counts["completed"])
-        self.detection_status_changed.emit("Detecting {}/{}: {} | {}".format(
-            self._detection_planned_orders.index(task.image_order) + 1,
-            counts["planned"], task.source_file, description
-        ))
-        self.detection_requested.emit(
-            task.path, self._detection_weight_path, task.context()
-        )
+
+        self._finish_detection_run()
 
     def _advance_detection_run(self):
+        if self._active_worker_task == "detection":
+            self._set_active_worker_task(None)
         task = self._batch_controller.next_task()
-        if task is not None:
-            self._dispatch_detection_task(task)
-            return
-        self._finish_detection_run()
+        self._dispatch_detection_task(task)
 
     def _finish_detection_run(self):
         summary = self._batch_controller.finish_if_done()
@@ -2777,6 +3245,10 @@ class DetectMain(QWidget):
             self._show_message_safely(QMessageBox.information, self, "Detection", message)
         self.ui.progressBar.setRange(0, counts["planned"])
         self.ui.progressBar.setValue(counts["completed"])
+        timer = getattr(self, "_detection_duration_timer", None)
+        if timer is not None:
+            timer.stop()
+        DetectMain._refresh_detection_duration_display(self)
         self._set_active_worker_task(None)
 
     @staticmethod
@@ -2799,12 +3271,12 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_detection_finished(self, payload):
-        if not DetectMain._detection_result_matches(self, payload):
+        if not DetectMain._detection_result_matches(
+            self, payload, require_samples=True
+        ):
             return
         if self._close_wait_pending or self._shutdown_requested:
             self._set_active_worker_task(None)
-            return
-        if not DetectMain._detection_result_matches(self, payload, require_source=True):
             return
         accepted = False
         try:
@@ -2816,9 +3288,15 @@ class DetectMain(QWidget):
                 raise ValueError("The detection annotated image must contain uint8 pixels.")
             if len(runtime_payload["targets"]) != len(runtime_payload["sample_results"]):
                 raise ValueError("Detection targets and samples must have the same length.")
+            display_channel = runtime_payload["display_channel"]
+            concentration_field = "con_{}".format(display_channel.lower())
             for target, sample in zip(runtime_payload["targets"], runtime_payload["sample_results"]):
                 if any(target[channel] != sample.get(channel.lower()) for channel in ("Red", "Green", "Blue")):
                     raise ValueError("Detection target RGB values must match the sample result.")
+                if target["Con."] != sample.get(concentration_field):
+                    raise ValueError(
+                        "Detection target concentration must be read from the selected SampleResult channel."
+                    )
             # Own one immutable annotated buffer per image, shared with the
             # controller's latest-result reference and the selected export view.
             annotated = np.array(image, copy=True, order="C")
@@ -2830,6 +3308,7 @@ class DetectMain(QWidget):
             export_fields = ("No.", "Con.", "Red", "Green", "Blue", "rgb_roi")
             record = _DetectionImageResult(
                 payload={"source_path": runtime_payload["source_path"], "image": annotated,
+                         "display_channel": display_channel,
                          "targets": [{field: t[field] for field in export_fields}
                                      for t in runtime_payload["targets"]]},
                 dirty=has_valid_samples,
@@ -2873,9 +3352,9 @@ class DetectMain(QWidget):
                     )
         except Exception as error:
             if not accepted:
-                accepted = self._batch_controller.accept_failure(
-                    payload.get("run_token"), payload.get("job_token"), error
-                )
+                failure = dict(payload)
+                failure["message"] = str(error)
+                accepted = self._batch_controller.accept_failure(failure)
             if not accepted:
                 return
             if self.batch_state.current_image.status == ImageStatus.FAILED:
@@ -2899,10 +3378,8 @@ class DetectMain(QWidget):
             self._set_active_worker_task(None)
             return
         message = str(failure.get("message", "Detection failed."))
-        run_token = failure["run_token"]
-        job_token = failure["job_token"]
         DetectMain._ensure_detection_run(self)
-        if not self._batch_controller.accept_failure(run_token, job_token, message):
+        if not self._batch_controller.accept_failure(failure):
             return
         try:
             DetectMain._show_detection_image(self, self.batch_state.current_image)
@@ -2915,7 +3392,16 @@ class DetectMain(QWidget):
 
     @Slot(object)
     def _on_regression_finished(self, payload):
+        if not DetectMain._linear_regression_result_matches(self, payload):
+            return
+        source_id = DetectMain._regression_source_id(payload["source_path"])
+        operation_token = payload["operation_token"]
         if self._close_wait_pending or self._shutdown_requested:
+            DetectMain._regression_session(self).accept_failure(
+                source_id,
+                operation_token,
+            )
+            DetectMain._refresh_linear_duration_display(self)
             self._set_active_worker_task(None)
             return
         previous_result = self._regression_result
@@ -2925,15 +3411,16 @@ class DetectMain(QWidget):
         previous_pixmap = self._origPixmap
         previous_model = self.ui.tabviewOrig.model()
         previous_plot_has_result = self._regression_plot_has_result
-        previous_elapsed = self.ui.lcdNumber.value()
         series_controller = getattr(self, "_linear_series_controller", None)
         previous_confirmed = (
             series_controller.last_confirmed_result
             if series_controller is not None
             else None
         )
+        regression_session = DetectMain._regression_session(self)
         try:
             export_payload = self._validated_linear_export_payload(payload)
+            payload["regression_set"] = export_payload["regression_set"]
             pixmap = self._bgr_image_to_pixmap(export_payload["image"])
             if pixmap.isNull():
                 raise ValueError("The regression annotated image could not be displayed.")
@@ -2957,9 +3444,18 @@ class DetectMain(QWidget):
                 self._regression_dirty = True
                 self._last_completed_result_type = "linear"
                 self._show_calibration_plot_placeholder()
-                self.ui.lcdNumber.display(int(round(payload["elapsed_ms"])))
                 if series_controller is not None:
                     series_controller.remember_confirmed_result(payload)
+                self.ui.progressBar.setRange(0, 100)
+                self.ui.progressBar.setValue(100)
+                timing = regression_session.accept_success(
+                    export_payload["regression_set"],
+                    operation_token,
+                )
+                if timing is None:
+                    raise ValueError(
+                        "The Linear Regression callback identity is stale."
+                    )
             except Exception:
                 self._regression_result = previous_result
                 self._regression_dirty = previous_dirty
@@ -2968,7 +3464,6 @@ class DetectMain(QWidget):
                 self._origPixmap = previous_pixmap
                 self.ui.tabviewOrig.setModel(previous_model)
                 self._scale_label(self.ui.labelOrigImg)
-                self.ui.lcdNumber.display(previous_elapsed)
                 if series_controller is not None:
                     series_controller.remember_confirmed_result(previous_confirmed)
                 if previous_result is not None and previous_plot_has_result:
@@ -2977,8 +3472,7 @@ class DetectMain(QWidget):
                     self._show_calibration_plot_placeholder()
                 raise
 
-            self.ui.progressBar.setRange(0, 100)
-            self.ui.progressBar.setValue(100)
+            DetectMain._refresh_linear_duration_display(self)
             warnings = [str(message) for message in payload.get("warnings", []) if message]
             if warnings:
                 self._show_message_safely(
@@ -2988,6 +3482,13 @@ class DetectMain(QWidget):
                     "\n".join(warnings),
                 )
         except Exception as error:
+            if not regression_session.accept_failure(
+                source_id,
+                operation_token,
+            ):
+                return
+            active_regression = regression_session.active_regression_set
+            DetectMain._refresh_linear_duration_display(self)
             self._restore_previous_regression_formulas(previous_result, previous_dirty)
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
@@ -2995,29 +3496,102 @@ class DetectMain(QWidget):
                 QMessageBox.critical,
                 self,
                 "Linear regression error",
-                "The new regression result was not accepted; the previous result was preserved.\n{}".format(
-                    error
+                (
+                    "The new regression result was not accepted; revision {} remains active.\n{}"
+                    .format(active_regression.revision, error)
+                    if active_regression is not None
+                    else "The new regression result was not accepted; no active regression is available. "
+                    "Complete a valid Linear Regression before Detection.\n{}".format(error)
                 ),
             )
         finally:
             self._set_active_worker_task(None)
 
-    @Slot(str)
-    def _on_regression_failed(self, message):
+    @Slot(object)
+    def _on_regression_failed(self, failure):
+        if not DetectMain._linear_regression_failure_matches(self, failure):
+            return
+        source_id = DetectMain._regression_source_id(failure["source_path"])
+        operation_token = failure["operation_token"]
         if self._close_wait_pending or self._shutdown_requested:
+            DetectMain._regression_session(self).accept_failure(
+                source_id,
+                operation_token,
+            )
+            DetectMain._refresh_linear_duration_display(self)
             self._set_active_worker_task(None)
             return
         try:
+            regression_session = DetectMain._regression_session(self)
+            if not regression_session.accept_failure(
+                source_id,
+                operation_token,
+            ):
+                return
+            active_regression = regression_session.active_regression_set
+            DetectMain._refresh_linear_duration_display(self)
+            previous_revision = (
+                active_regression.revision
+                if active_regression is not None
+                else None
+            )
             self._restore_previous_regression_formulas(
                 self._regression_result, self._regression_dirty
             )
             self.ui.progressBar.setRange(0, 100)
             self.ui.progressBar.setValue(0)
             self._show_message_safely(
-                QMessageBox.critical, self, "Linear regression error", message
+                QMessageBox.critical,
+                self,
+                "Linear regression error",
+                "The new calibration was not activated.{}\n{}".format(
+                    (
+                        " The previous confirmed regression remains active as revision {}."
+                        .format(previous_revision)
+                        if previous_revision
+                        else " No active regression is available; Detection is blocked "
+                        "until a valid Linear Regression succeeds."
+                    ),
+                    failure["message"],
+                ),
             )
         finally:
             self._set_active_worker_task(None)
+
+    def _linear_regression_result_matches(self, payload):
+        if self._active_worker_task != "regression" or not isinstance(payload, dict):
+            return False
+        session = DetectMain._regression_session(self)
+        if not session.attempt_active:
+            return False
+        source_path = payload.get("source_path")
+        operation_token = payload.get("operation_token")
+        return (
+            isinstance(source_path, str)
+            and source_path == self._calibration_source_path
+            and session.matches_active_operation(
+                DetectMain._regression_source_id(source_path),
+                operation_token,
+            )
+        )
+
+    def _linear_regression_failure_matches(self, failure):
+        if self._active_worker_task != "regression" or not isinstance(failure, dict):
+            return False
+        session = DetectMain._regression_session(self)
+        if not session.attempt_active:
+            return False
+        source_path = failure.get("source_path")
+        operation_token = failure.get("operation_token")
+        return (
+            isinstance(source_path, str)
+            and source_path == self._calibration_source_path
+            and isinstance(failure.get("message"), str)
+            and session.matches_active_operation(
+                DetectMain._regression_source_id(source_path),
+                operation_token,
+            )
+        )
 
     def _restore_previous_regression_formulas(self, result, dirty):
         if dirty and isinstance(result, dict):
@@ -3041,6 +3615,13 @@ class DetectMain(QWidget):
             return
         self._shutdown_requested = True
         self._close_wait_pending = False
+        timer = getattr(self, "_detection_duration_timer", None)
+        if timer is not None:
+            timer.stop()
+        timer = getattr(self, "_linear_duration_timer", None)
+        if timer is not None:
+            timer.stop()
+        DetectMain._regression_session(self).cancel_attempt()
         self._set_active_worker_task(self._active_worker_task)
         self.mainCamera.request_shutdown()
         if self._detection_thread.isRunning():

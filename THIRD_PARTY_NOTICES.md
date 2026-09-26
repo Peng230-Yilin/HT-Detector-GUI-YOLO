@@ -10,16 +10,16 @@ The GUI integration, result workflows, configuration handling, release tooling, 
 
 ## hmy-repo MIT components
 
-Code imported from the historical `hmy-repo` components retains its MIT license. The original license texts are preserved without replacement at:
+The original MIT license texts from the two historical `hmy-repo` source components are preserved without replacement at:
 
-- `Peng1.0_GUI/LICENSE`
-- `HT-Detector_Peng/LICENSE`
+- [Preserved MIT license text](LICENSES/Peng1.0%5FGUI-LICENSE.txt) for the historical `HT_Detector_GUI_v1_0` component
+- [Preserved MIT license text](LICENSES/HT-Detector%5FPeng-LICENSE.txt) for the historical `YOLO_Detection_Core` component
 
-The root AGPL-3.0 license does not revoke or retroactively alter rights already granted under those MIT license texts.
+The root AGPL-3.0 license does not revoke or retroactively alter rights already granted under those MIT license texts. Preservation of these two texts does not by itself license the entire product, vendored Ultralytics, or unrelated third-party resources under MIT.
 
 ## Ultralytics 8.1.47
 
-`HT-Detector_Peng/ultralytics/` contains vendored and modified Ultralytics 8.1.47 source code. Its source headers and package metadata identify AGPL-3.0. The complete AGPL-3.0 text is the repository root [LICENSE](LICENSE). Upstream attribution is also retained in `HT-Detector_Peng/CITATION.cff` and the vendored source headers.
+`ultralytics/` contains vendored and modified Ultralytics 8.1.47 source code. Its source headers and package metadata identify AGPL-3.0. The complete AGPL-3.0 text is the repository root [LICENSE](LICENSE). Upstream attribution remains in the vendored source headers. The tracked `YOLO_Detection_Core/CITATION.cff` remains in the legacy container for the later C1B migration and is not included by the C1A release manifest.
 
 Upstream project: <https://github.com/ultralytics/ultralytics>
 
@@ -29,11 +29,11 @@ The fixed `best.pt` checkpoint is based on Ultralytics YOLOv8n and is distribute
 
 ## Qt and PySide6 example-derived code
 
-`Peng1.0_GUI/camera.py` retains the Qt Company copyright and its file-level SPDX notice, `LicenseRef-Qt-Commercial OR BSD-3-Clause`. PySide6 itself is installed as an external dependency and is not vendored into the source release. Recipients must review the license files supplied with the installed PySide6 distribution and Qt's licensing terms: <https://www.qt.io/licensing/>.
+`camera.py` retains the Qt Company copyright and its file-level SPDX notice, `LicenseRef-Qt-Commercial OR BSD-3-Clause`. PySide6 itself is installed as an external dependency and is not vendored into the source release. Recipients must review the license files supplied with the installed PySide6 distribution and Qt's licensing terms: <https://www.qt.io/licensing/>.
 
 ## Icons and resources
 
-The public-domain notice for the identified third-party icons is preserved at `Peng1.0_GUI/resource/3rdparty/COPYING`. The associated Qt attribution metadata is preserved at `Peng1.0_GUI/resource/3rdparty/qt_attribution.json`. Other resource files retain any embedded or adjacent notices supplied with them.
+The public-domain notice for the identified third-party icons is preserved at `resource/3rdparty/COPYING`. The associated Qt attribution metadata is preserved at `resource/3rdparty/qt_attribution.json`. Other resource files retain any embedded or adjacent notices supplied with them.
 
 ## pip-installed runtime dependencies
 

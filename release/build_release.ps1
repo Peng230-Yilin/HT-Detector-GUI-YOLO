@@ -27,16 +27,23 @@ function Assert-SafeRelativePath([string]$Path) {
 
 function Assert-NoForbiddenFiles([string]$Root) {
     $forbidden = Get-ChildItem -LiteralPath $Root -Force -Recurse | Where-Object {
+        $relative = $_.FullName.Substring($Root.TrimEnd('\').Length + 1).Replace('\', '/')
         $_.Name -eq ".git" -or
         $_.Name -eq ".venv" -or
+        $_.Name -eq ".eggs" -or
+        $_.Name -eq "build" -or
+        $_.Name -eq "dist" -or
         $_.Name -eq "__pycache__" -or
         $_.Name -eq ".pytest_cache" -or
         $_.Name -eq ".vscode" -or
         $_.Name -eq "Run HT-Detector.txt" -or
         $_.Name -like "*.pyc" -or
+        $_.Name -like "*.egg-info" -or
         $_.Name -like "MySKILL*.txt" -or
+        $relative -match '^(HT_Detector_GUI_v1_0|YOLO_Detection_Core)(/|$)' -or
+        $relative -eq 'custom/linear_detection/detection/1..10.jpg' -or
         $_.FullName -match '[\\/](runs|results|Paper1-Integrated)([\\/]|$)' -or
-        ($_.Extension -eq ".pt" -and $_.FullName -notlike "*\HT-Detector_Peng\weights\cuvette_Peng\yolov8n_train\weights\best.pt")
+        ($_.Extension -eq ".pt" -and $relative -ne "weights/cuvette_Peng/yolov8n_train/weights/best.pt")
     }
     if ($forbidden) {
         throw "Forbidden release content:`n$($forbidden.FullName -join "`n")"
@@ -79,9 +86,11 @@ try {
 
     if ($DryRun) {
         New-Item -ItemType Directory -Path $destination | Out-Null
-        $files = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $files = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($entry in $manifestEntries) {
-            $listed = @(& git ls-files --cached --others --exclude-standard -- $entry)
+            $listed = @(& git ls-files --cached -- $entry)
+            if ($LASTEXITCODE -ne 0) { throw "Unable to read staged manifest entry: $entry" }
+            if (-not $listed) { throw "Manifest entry has no staged files: $entry" }
             foreach ($file in $listed) { [void]$files.Add($file) }
         }
         foreach ($file in $files) {

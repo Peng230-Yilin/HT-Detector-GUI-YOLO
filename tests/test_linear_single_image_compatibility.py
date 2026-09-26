@@ -22,7 +22,7 @@ from matplotlib.figure import Figure
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-GUI_ROOT = PROJECT_ROOT / "Peng1.0_GUI"
+GUI_ROOT = PROJECT_ROOT
 DETECTMAIN_SOURCE = GUI_ROOT / "detectmain.py"
 DETECTIONWINDOW_SOURCE = GUI_ROOT / "detectionwindow.py"
 sys.path.insert(0, str(GUI_ROOT))
@@ -495,7 +495,7 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
         self.assertEqual(_dotted_name(regression_signal.func), "Signal")
         self.assertEqual(
             tuple(_dotted_name(argument) for argument in regression_signal.args),
-            ("str", "str"),
+            ("str", "str", "object"),
         )
         for name in (
             "clear_active_formulas_requested",
@@ -546,7 +546,11 @@ class LinearSingleImageSourceCompatibilityTests(unittest.TestCase):
             and _dotted_name(call.func) == "self.regression_requested.emit"
         ]
         self.assertEqual(len(emissions), 1)
-        self.assertEqual(len(emissions[0].args), 2)
+        self.assertEqual(len(emissions[0].args), 3)
+        self.assertEqual(
+            _dotted_name(emissions[0].args[2]),
+            "operation.operation_token",
+        )
 
     def test_mode_switch_preserves_confirmed_payload_formulas_and_detection(self):
         harness = DetectMainModeHarness()

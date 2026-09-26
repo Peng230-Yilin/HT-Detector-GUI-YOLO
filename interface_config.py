@@ -45,11 +45,11 @@ DETECTION_PREFERENCES_DEFAULTS = {
 
 
 def load_interface_module():
-    repository_root = Path(__file__).resolve().parent.parent
-    interface_path = repository_root / "HT-Detector_Peng" / "interface.py"
+    repository_root = Path(__file__).resolve().parent
+    interface_path = repository_root / "interface.py"
     if not interface_path.is_file():
         raise RuntimeError(
-            "The HT-Detector_Peng interface module was not found: {}".format(
+            "The repository interface module was not found: {}".format(
                 interface_path
             )
         )
@@ -80,7 +80,7 @@ def load_interface_module():
         else:
             sys.modules.pop("interface", None)
         raise RuntimeError(
-            "Failed to load HT-Detector_Peng interface module from {}: {}".format(
+            "Failed to load the repository interface module from {}: {}".format(
                 interface_path, error
             )
         ) from error

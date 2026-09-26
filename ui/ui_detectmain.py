@@ -113,52 +113,52 @@ class Ui_Form(object):
         self.gridLayout.setObjectName(u"gridLayout")
         self.horizontalSpacer_5 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout.addItem(self.horizontalSpacer_5, 1, 0, 1, 1)
+        self.gridLayout.addItem(self.horizontalSpacer_5, 0, 0, 1, 1)
 
         self.pushButton_5 = QPushButton(self.groupBox_4)
         self.pushButton_5.setObjectName(u"pushButton_5")
 
-        self.gridLayout.addWidget(self.pushButton_5, 1, 1, 1, 1)
+        self.gridLayout.addWidget(self.pushButton_5, 0, 1, 1, 1)
 
         self.pushButton_8 = QPushButton(self.groupBox_4)
         self.pushButton_8.setObjectName(u"pushButton_8")
 
-        self.gridLayout.addWidget(self.pushButton_8, 1, 9, 1, 1)
+        self.gridLayout.addWidget(self.pushButton_8, 0, 9, 1, 1)
 
         self.horizontalSpacer = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout.addItem(self.horizontalSpacer, 1, 2, 1, 1)
+        self.gridLayout.addItem(self.horizontalSpacer, 0, 2, 1, 1)
 
         self.pushButton_4 = QPushButton(self.groupBox_4)
         self.pushButton_4.setObjectName(u"pushButton_4")
 
-        self.gridLayout.addWidget(self.pushButton_4, 1, 3, 1, 1)
+        self.gridLayout.addWidget(self.pushButton_4, 0, 3, 1, 1)
 
         self.horizontalSpacer_4 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout.addItem(self.horizontalSpacer_4, 1, 8, 1, 1)
+        self.gridLayout.addItem(self.horizontalSpacer_4, 0, 8, 1, 1)
 
         self.pushButton_7 = QPushButton(self.groupBox_4)
         self.pushButton_7.setObjectName(u"pushButton_7")
 
-        self.gridLayout.addWidget(self.pushButton_7, 1, 5, 1, 1)
+        self.gridLayout.addWidget(self.pushButton_7, 0, 5, 1, 1)
 
         self.horizontalSpacer_2 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout.addItem(self.horizontalSpacer_2, 1, 4, 1, 1)
+        self.gridLayout.addItem(self.horizontalSpacer_2, 0, 4, 1, 1)
 
         self.horizontalSpacer_3 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout.addItem(self.horizontalSpacer_3, 1, 6, 1, 1)
+        self.gridLayout.addItem(self.horizontalSpacer_3, 0, 6, 1, 1)
 
         self.pushButton = QPushButton(self.groupBox_4)
         self.pushButton.setObjectName(u"pushButton")
 
-        self.gridLayout.addWidget(self.pushButton, 1, 7, 1, 1)
+        self.gridLayout.addWidget(self.pushButton, 0, 7, 1, 1)
 
         self.horizontalSpacer_6 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout.addItem(self.horizontalSpacer_6, 1, 10, 1, 1)
+        self.gridLayout.addItem(self.horizontalSpacer_6, 0, 10, 1, 1)
 
 
         self.verticalLayout_12.addLayout(self.gridLayout)
@@ -246,7 +246,8 @@ class Ui_Form(object):
         self.lcdNumber.setObjectName(u"lcdNumber")
         self.lcdNumber.setAcceptDrops(False)
         self.lcdNumber.setFrameShape(QFrame.Shape.Panel)
-        self.lcdNumber.setProperty("intValue", 377)
+        self.lcdNumber.setDigitCount(10)
+        self.lcdNumber.display("")
 
         self.horizontalLayout_2.addWidget(self.lcdNumber)
 
@@ -318,7 +319,7 @@ class Ui_Form(object):
         self.labelRecgImg.setText("")
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_3), QCoreApplication.translate("Form", u"Detection Image", None))
         self.label_5.setText(QCoreApplication.translate("Form", u"Progress:", None))
-        self.label_9.setText(QCoreApplication.translate("Form", u"Period:", None))
+        self.label_9.setText(QCoreApplication.translate("Form", u"Time (ms):", None))
         self.label_4.setText(QCoreApplication.translate("Form", u"Table. Detection", None))
     # retranslateUi
 

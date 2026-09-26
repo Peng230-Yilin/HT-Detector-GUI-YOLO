@@ -530,11 +530,11 @@ class Results(SimpleClass):
                 # annotator.text([int(x0), int(y1) - y_bias * 8 - txt_bias * 2], "No." + str(id), txt_color=(0, 0, 0))
                 if add_light:
                     if con_dis < 5:
-                        light = os.path.join(os.getcwd(), 'custom/lightImg/green_BGR.png')
+                        light = str(Path(__file__).resolve().parents[2] / 'custom' / 'lightImg' / 'green_BGR.png')
                     elif con_dis > 30:
-                        light = os.path.join(os.getcwd(), 'custom/lightImg/red_BGR.png')
+                        light = str(Path(__file__).resolve().parents[2] / 'custom' / 'lightImg' / 'red_BGR.png')
                     else: # 5<con_dis<30
-                        light = os.path.join(os.getcwd(), 'custom/lightImg/yellow_BGR.png')
+                        light = str(Path(__file__).resolve().parents[2] / 'custom' / 'lightImg' / 'yellow_BGR.png')
                     light_dict[str(id)] = [int(x0)+15, int(y1) - y_bias * 8 - txt_bias * 2 - 300, light]
                 # id_dict[str(id)] = [int(x0)+50, int(y1) - y_bias * 8 - int(txt_bias * 3.5)]
 #改动4

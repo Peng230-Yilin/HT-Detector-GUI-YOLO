@@ -41,7 +41,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install-v1.0.0.ps1 -PythonExecutable "C:\Path\To\Python310\python.exe"
 ```
 
-指定路径后，脚本只使用该路径且不会静默回退。无论自动发现还是显式指定，解释器都必须通过 CPython 3.10.11、64 位和实际 `sys.executable` 路径验证。脚本随后创建 `.venv`，先从 `https://download.pytorch.org/whl/cpu` 安装经过验证的 CPU Torch 组合，再安装 GUI 运行依赖，最后以 editable、`--no-deps` 方式安装仓库内 `HT-Detector_Peng`。脚本拒绝覆盖已有 `.venv`。
+指定路径后，脚本只使用该路径且不会静默回退。无论自动发现还是显式指定，解释器都必须通过 CPython 3.10.11、64 位和实际 `sys.executable` 路径验证。脚本随后创建 `.venv`，先从 `https://download.pytorch.org/whl/cpu` 安装经过验证的 CPU Torch 组合，再安装 GUI 运行依赖，最后以 editable、`--no-deps` 方式安装仓库根目录中的 Ultralytics 源码。脚本拒绝覆盖已有 `.venv`。
 
 ### 手动安装
 
@@ -52,18 +52,18 @@ $PythonExecutable = "C:\Path\To\Python310\python.exe"
 .venv\Scripts\python.exe -B -m pip install --upgrade pip
 .venv\Scripts\python.exe -B -m pip install -r requirements-torch-cpu.txt
 .venv\Scripts\python.exe -B -m pip install -r requirements-runtime.txt
-.venv\Scripts\python.exe -B -m pip install --no-deps --editable .\HT-Detector_Peng
+.\.venv\Scripts\python.exe -B -m pip install --no-deps --editable .
 .venv\Scripts\python.exe -B -m pip check
 ```
 
-必须安装仓库内 `HT-Detector_Peng`，并保持最后一步使用 `--no-deps --editable`；不要再执行 `pip install ultralytics`，否则可能覆盖或绕过本项目的可信权重加载修改。
+必须从仓库根目录执行 editable 安装，并保持最后一步使用 `--no-deps --editable`；不要再执行 `pip install ultralytics`，否则可能覆盖或绕过本项目的可信权重加载修改。
 
 ## 启动
 
 在仓库或运行包根目录执行：
 
 ```powershell
-.venv\Scripts\python.exe -B Peng1.0_GUI\main.py
+.\.venv\Scripts\python.exe -B .\main.py
 ```
 
 ## Linear Regression 操作顺序
@@ -77,13 +77,13 @@ $PythonExecutable = "C:\Path\To\Python310\python.exe"
 默认标定图片目录：
 
 ```text
-HT-Detector_Peng/custom/linear_detection/linear
+custom/linear_detection/linear
 ```
 
 线性回归保存目录：
 
 ```text
-HT-Detector_Peng/runs/detect/results/linear
+runs/detect/results/linear
 ```
 
 保存内容包括：
@@ -103,13 +103,13 @@ HT-Detector_Peng/runs/detect/results/linear
 默认检测图片目录：
 
 ```text
-HT-Detector_Peng/custom/linear_detection/detection
+custom/linear_detection/detection
 ```
 
 检测保存目录：
 
 ```text
-HT-Detector_Peng/runs/detect/results/detection
+runs/detect/results/detection
 ```
 
 每次保存生成同名的一组文件：
@@ -128,7 +128,7 @@ HT-Detector_Peng/runs/detect/results/detection
 固定权重路径：
 
 ```text
-HT-Detector_Peng/weights/cuvette_Peng/yolov8n_train/weights/best.pt
+weights/cuvette_Peng/yolov8n_train/weights/best.pt
 ```
 
 模型的用途、来源、大小、SHA-256 和限制见 [MODEL_CARD.md](MODEL_CARD.md)。加载器会校验固定路径、文件大小和 SHA-256。
@@ -142,7 +142,7 @@ HT-Detector_Peng/weights/cuvette_Peng/yolov8n_train/weights/best.pt
 - 当前发布基线是 Windows、Python 3.10.11 和 CPU 推理。
 - 摄像头只提供 Start/Stop 预览。
 - 界面尚未提供完整中英文切换。
-- 结果默认写入运行包目录下的 `HT-Detector_Peng/runs/`；请确保目录可写并自行备份结果。
+- 结果默认写入运行包根目录下的 `runs/`；请确保目录可写并自行备份结果。
 
 ## 许可证与第三方组件
 
@@ -152,7 +152,7 @@ HT-Detector_Peng/weights/cuvette_Peng/yolov8n_train/weights/best.pt
 - 第三方组件和历史 MIT 组件说明：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 - 许可证文件映射：[LICENSES/README.md](LICENSES/README.md)
 
-现有 `Peng1.0_GUI/LICENSE` 和 `HT-Detector_Peng/LICENSE` 作为原始 hmy-repo 组件的 MIT 许可证保留；这不表示撤销或追溯更改历史 MIT 授权。
+[HT_Detector_GUI_v1_0 历史组件 MIT 许可证](LICENSES/Peng1.0%5FGUI-LICENSE.txt) 和 [YOLO_Detection_Core 历史组件 MIT 许可证](LICENSES/HT-Detector%5FPeng-LICENSE.txt) 分别保留两个原始 hmy-repo 组件的 MIT 许可证文本；这些文件仅说明相应历史组件的许可来源，不扩大为整个产品或全部第三方代码的许可证，也不表示撤销或追溯更改既有 MIT 授权。
 
 ## 发布命名
 

@@ -113,14 +113,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Failed to install the verified GUI runtime packages." }
 
     # Install the repository copy last and without dependency resolution so PyPI cannot replace it.
-    & $venvPython -B -m pip install --no-deps --editable .\HT-Detector_Peng
+    & $venvPython -B -m pip install --no-deps --editable $repositoryRoot
     if ($LASTEXITCODE -ne 0) { throw "Failed to install the repository Ultralytics source." }
 
     & $venvPython -B -m pip check
     if ($LASTEXITCODE -ne 0) { throw "pip check reported an inconsistent environment." }
 
     Write-Host "Installation complete. Start with:"
-    Write-Host ".venv\Scripts\python.exe -B Peng1.0_GUI\main.py"
+    Write-Host ".\.venv\Scripts\python.exe -B .\main.py"
 }
 finally {
     Pop-Location

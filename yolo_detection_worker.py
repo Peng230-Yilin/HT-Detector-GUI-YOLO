@@ -3,14 +3,17 @@ import numbers
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from batch_state import (
+    RegressionSet,
     SampleError,
     SampleErrorType,
     SampleResult,
     assign_image_numbers,
+    normalize_internal_path,
     pair_cuvettes_and_liquids,
 )
 from interface_config import load_effective_settings
@@ -33,6 +36,19 @@ _LINEAR_SERIES_SETTING_FIELDS = (
     "y1_ratio",
     "rgb_calculate_accuracy",
     "rgb_display_accuracy",
+)
+_DETECTION_IDENTITY_FIELDS = (
+    "run_token",
+    "job_token",
+    "regression_revision",
+    "image_order",
+    "source_path",
+    "source_file",
+)
+_DETECTION_TASK_FIELDS = _DETECTION_IDENTITY_FIELDS + (
+    "batch_start_no",
+    "display_start_no",
+    "regression_set",
 )
 
 
@@ -176,7 +192,7 @@ class YoloDetectionWorker(QObject):
     finished = Signal(object)
     failed = Signal(object)
     regression_finished = Signal(object)
-    regression_failed = Signal(str)
+    regression_failed = Signal(object)
     linear_series_extraction_finished = Signal(object)
     linear_series_extraction_failed = Signal(object)
 
@@ -189,6 +205,87 @@ class YoloDetectionWorker(QObject):
         self._weight_path = None
         self._formula_cache = {}
         self._active_formulas = None
+
+    @staticmethod
+    def lock_detection_context(image_path, context):
+        """Validate task values and create the one formal immutable context."""
+        if not isinstance(context, Mapping):
+            raise ValueError("Detection task context must be a mapping.")
+
+        YoloDetectionWorker._validate_detection_context_values(image_path, context)
+        locked = {
+            name: context[name]
+            for name in _DETECTION_TASK_FIELDS
+        }
+        return MappingProxyType(locked)
+
+    @staticmethod
+    def _validate_detection_context_values(image_path, context):
+        """Validate a context without copying, wrapping, or replacing it."""
+        if not isinstance(context, Mapping):
+            raise ValueError("Detection task context must be a mapping.")
+
+        missing = [name for name in _DETECTION_TASK_FIELDS if name not in context]
+        if missing:
+            raise ValueError(
+                "Detection task context is missing: {}.".format(
+                    ", ".join(missing)
+                )
+            )
+
+        for name in ("run_token", "job_token", "image_order"):
+            value = context[name]
+            if type(value) is not int or value <= 0:
+                raise ValueError(
+                    "Detection task {} must be a positive exact integer.".format(name)
+                )
+        for name in ("regression_revision", "source_path", "source_file"):
+            value = context[name]
+            if type(value) is not str or not value:
+                raise ValueError(
+                    "Detection task {} must be a non-empty string.".format(name)
+                )
+
+        if type(image_path) is not str or not image_path:
+            raise ValueError("Detection image_path must be a non-empty string.")
+        if image_path != normalize_internal_path(image_path):
+            raise ValueError("Detection image_path must be an absolute normalized path.")
+        if context["source_path"] != image_path:
+            raise ValueError(
+                "Detection source path does not match its task identity."
+            )
+        if context["source_file"] != Path(image_path).name:
+            raise ValueError(
+                "Detection source file does not match its task identity."
+            )
+
+        regression_set = context["regression_set"]
+        if not isinstance(regression_set, RegressionSet):
+            raise ValueError("Detection context is missing a complete RegressionSet.")
+        if context["regression_revision"] != regression_set.revision:
+            raise ValueError(
+                "Detection RegressionSet revision does not match its context."
+            )
+
+        for name in ("batch_start_no", "display_start_no"):
+            value = context[name]
+            if type(value) is not int or value <= 0:
+                raise ValueError(
+                    "Detection task {} must be a positive exact integer.".format(name)
+                )
+        return context
+
+    @staticmethod
+    def _validated_detection_context(image_path, context):
+        """Defensive worker-side validation for an already gated task."""
+        if isinstance(context, MappingProxyType):
+            YoloDetectionWorker._validate_detection_context_values(
+                image_path, context
+            )
+            return context
+        # Compatibility for direct pure unit tests.  The formal GUI dispatch
+        # path always supplies the already locked MappingProxyType.
+        return YoloDetectionWorker.lock_detection_context(image_path, context)
 
     @classmethod
     def _validated_formulas(cls, formulas, source="regression formulas"):
@@ -305,8 +402,8 @@ class YoloDetectionWorker(QObject):
         if color_channel in self._formula_cache:
             return self._formula_cache[color_channel]
 
-        repository_root = Path(__file__).resolve().parent.parent
-        results_root = repository_root / "HT-Detector_Peng" / "runs" / "detect" / "results"
+        repository_root = Path(__file__).resolve().parent
+        results_root = repository_root / "runs" / "detect" / "results"
         merged_path = results_root / "linear" / "linear_con_rgb.xlsx"
         if merged_path.is_file():
             formulas = self._read_merged_formulas(merged_path)
@@ -889,6 +986,7 @@ class YoloDetectionWorker(QObject):
     def _build_payload(
         self, result, settings, cv2, source_path="", config_warnings=None,
         image_order=1, batch_start_no=1, display_start_no=1,
+        regression_set=None,
     ):
         import numpy as np
 
@@ -901,6 +999,8 @@ class YoloDetectionWorker(QObject):
         sample_results = []
         sample_errors = []
         source_file = Path(source_path).name if source_path else ""
+        if not isinstance(regression_set, RegressionSet):
+            raise RuntimeError("A complete RegressionSet snapshot is required.")
 
         color_channel = settings["color_channel"]
         if color_channel not in {"R", "G", "B"}:
@@ -924,6 +1024,7 @@ class YoloDetectionWorker(QObject):
                 "image": annotated, "targets": targets, "warnings": warnings,
                 "sample_results": sample_results,
                 "sample_errors": [error.as_dict() for error in sample_errors],
+                "display_channel": color_channel,
             }
 
         coordinates = boxes.xyxy.detach().cpu().numpy()
@@ -982,9 +1083,9 @@ class YoloDetectionWorker(QObject):
                 "image": annotated, "targets": targets, "warnings": warnings,
                 "sample_results": sample_results,
                 "sample_errors": [error.as_dict() for error in sample_errors],
+                "display_channel": color_channel,
             }
 
-        slope, intercept = self._load_formula(color_channel)
         ratios = (
             settings["x0_ratio"],
             settings["y0_ratio"],
@@ -996,13 +1097,10 @@ class YoloDetectionWorker(QObject):
         for number, (cuvette_box, liquid_box) in enumerate(pairs, start=1):
             try:
                 roi = _calculate_rgb_roi(liquid_box, original_bgr.shape, ratios)
-                red, green, blue, concentration = _calculate_measurement(
+                red, green, blue = _calculate_rgb_averages(
                     original_bgr,
                     roi,
                     settings["rgb_calculate_accuracy"],
-                    color_channel,
-                    slope,
-                    intercept,
                 )
             except (TypeError, ValueError) as error:
                 warnings.append("No.{} was skipped: {}".format(number, error))
@@ -1023,8 +1121,7 @@ class YoloDetectionWorker(QObject):
                 ))
                 continue
 
-            concentrations = {"R": None, "G": None, "B": None}
-            concentrations[color_channel] = concentration
+            channel_results = regression_set.calculate_all(red, green, blue)
             sample = SampleResult(
                 image_order=image_order,
                 source_file=source_file,
@@ -1034,17 +1131,20 @@ class YoloDetectionWorker(QObject):
                 red=red,
                 green=green,
                 blue=blue,
-                con_r=concentrations["R"],
-                con_g=concentrations["G"],
-                con_b=concentrations["B"],
+                con_r=channel_results["R"][0],
+                con_g=channel_results["G"][0],
+                con_b=channel_results["B"][0],
+                status_r=channel_results["R"][1],
+                status_g=channel_results["G"][1],
+                status_b=channel_results["B"][1],
             )
-            measured.append((sample, concentration))
+            measured.append(sample)
 
-        ordered_samples = assign_image_numbers([sample for sample, _ in measured])
-        concentrations_by_identity = {id(sample): value for sample, value in measured}
+        ordered_samples = assign_image_numbers(measured)
         for sample in ordered_samples:
             sample.batch_no = batch_start_no + sample.no_in_image - 1
-            concentration = concentrations_by_identity[id(sample)]
+            concentration = sample.concentration_for(color_channel)
+            concentration_status = sample.concentration_status_for(color_channel)
             sample_results.append(sample)
             display_number = display_start_no + sample.no_in_image - 1
             targets.append(sample.legacy_target(concentration, display_number))
@@ -1061,9 +1161,13 @@ class YoloDetectionWorker(QObject):
                 "G": round(green, settings["rgb_display_accuracy"]),
                 "B": round(blue, settings["rgb_display_accuracy"]),
             }
-            con_text = round(concentration, settings["con_display_accuracy"])
+            con_text = (
+                round(concentration, settings["con_display_accuracy"])
+                if concentration is not None
+                else "N/A ({})".format(concentration_status.value)
+            )
             text_lines = [("No.{}".format(display_number), (255, 0, 255)),
-                          ("Con.:{}".format(con_text), (255, 255, 0))]
+                          ("Con.{}:{}".format(color_channel, con_text), (255, 255, 0))]
             text_lines.extend(
                 ("{}:{}".format(channel, text_values[channel]), rgb_colors[channel])
                 for channel in display_order[3:]
@@ -1087,6 +1191,7 @@ class YoloDetectionWorker(QObject):
             "warnings": warnings,
             "sample_results": [sample.as_dict() for sample in sample_results],
             "sample_errors": [error.as_dict() for error in sample_errors],
+            "display_channel": color_channel,
         }
 
     @staticmethod
@@ -1254,17 +1359,27 @@ class YoloDetectionWorker(QObject):
                 formula_concentrations, [sample["Blue"] for sample in included_samples], "B"
             ),
         }
+        valid_range = (
+            min(formula_concentrations), max(formula_concentrations)
+        )
+        regression_set = RegressionSet.from_formulas(
+            formulas,
+            source_id="runtime-calibration:{}".format(str(source_path)),
+            valid_ranges=valid_range,
+        )
         return {
             "source_path": str(source_path),
             "image": annotated,
             "samples": samples,
             "formulas": formulas,
+            "regression_set": regression_set,
             "selected_channel": settings["color_channel"],
             "warnings": warnings,
         }
 
     @Slot(str, str, object)
     def detect(self, image_path, weight_path, context=None):
+        locked_context = self._validated_detection_context(image_path, context)
         try:
             import cv2
             import numpy as np
@@ -1286,31 +1401,45 @@ class YoloDetectionWorker(QObject):
             if not results:
                 raise RuntimeError("YOLO returned no result for the selected image.")
 
-            context = dict(context or {})
             payload = self._build_payload(
-                results[0], settings, cv2, source_path=str(image_path),
+                results[0], settings, cv2,
+                source_path=locked_context["source_path"],
                 config_warnings=config_warnings,
-                image_order=int(context.get("image_order", 1)),
-                batch_start_no=int(context.get("batch_start_no", 1)),
-                display_start_no=int(context.get("display_start_no", 1)),
+                image_order=locked_context["image_order"],
+                batch_start_no=locked_context["batch_start_no"],
+                display_start_no=locked_context["display_start_no"],
+                regression_set=locked_context["regression_set"],
             )
-            payload["source_path"] = str(image_path)
-            payload["run_token"] = context.get("run_token")
-            payload["job_token"] = context.get("job_token")
-            self.finished.emit(payload)
-        except Exception as error:
-            context = dict(context or {})
-            self.failed.emit({
-                "message": "{}: {}".format(type(error).__name__, error),
-                "run_token": context.get("run_token"),
-                "job_token": context.get("job_token"),
+            payload.update({
+                name: locked_context[name]
+                for name in _DETECTION_IDENTITY_FIELDS
             })
+        except Exception as error:
+            failure = {
+                name: locked_context[name]
+                for name in _DETECTION_IDENTITY_FIELDS
+            }
+            failure.update({
+                "message": "{}: {}".format(type(error).__name__, error),
+            })
+            self.failed.emit(failure)
+            return
 
-    @Slot(str, str)
-    def regress(self, image_path, weight_path):
-        started = time.perf_counter()
+        self.finished.emit(payload)
+
+    @Slot(str, str, object)
+    def regress(self, image_path, weight_path, operation_token):
+        callback_identity = {
+            "source_path": image_path,
+            "operation_token": operation_token,
+        }
         self._active_formulas = None
         try:
+            if type(operation_token) is not int or operation_token <= 0:
+                raise ValueError(
+                    "Regression operation token must be an exact positive integer."
+                )
+            started = time.perf_counter()
             import cv2
             import numpy as np
 
@@ -1340,8 +1469,11 @@ class YoloDetectionWorker(QObject):
                 config_warnings=config_warnings,
             )
             payload["elapsed_ms"] = (time.perf_counter() - started) * 1000.0
+            payload.update(callback_identity)
             self._active_formulas = payload["formulas"]
             self.regression_finished.emit(payload)
         except Exception as error:
             self._active_formulas = None
-            self.regression_failed.emit("{}: {}".format(type(error).__name__, error))
+            failure = dict(callback_identity)
+            failure["message"] = "{}: {}".format(type(error).__name__, error)
+            self.regression_failed.emit(failure)

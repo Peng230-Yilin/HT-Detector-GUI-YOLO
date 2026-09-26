@@ -2,10 +2,13 @@
 # For 小彭
 
 import os
-linear_dir = os.path.join(os.getcwd(), 'custom/linear_detection/linear/') #不用更改
-detection_dir = os.path.join(os.getcwd(), 'custom/linear_detection/detection/') #不用更改
-results_dir = os.path.join(os.getcwd(), 'runs/detect/results/') #不用更改
-detect_weights_path = "weights/cuvette_Peng/yolov8n_train/weights/best.pt" #不用更改
+from pathlib import Path
+
+repository_root = str(Path(__file__).resolve().parent)
+linear_dir = os.path.join(repository_root, 'custom/linear_detection/linear/') #不用更改
+detection_dir = os.path.join(repository_root, 'custom/linear_detection/detection/') #不用更改
+results_dir = os.path.join(repository_root, 'runs/detect/results/') #不用更改
+detect_weights_path = os.path.join(repository_root, 'weights/cuvette_Peng/yolov8n_train/weights/best.pt') #不用更改
 
 #选择框的左上角点位置
 x0_ratio = 3.4/8 #可以更改

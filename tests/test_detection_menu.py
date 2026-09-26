@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "Peng1.0_GUI"))
+sys.path.insert(0, str(ROOT))
 
 from PySide6.QtWidgets import QApplication, QMainWindow  # noqa: E402
 import detectionwindow  # noqa: E402

@@ -10,7 +10,7 @@ import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-GUI_ROOT = PROJECT_ROOT / "Peng1.0_GUI"
+GUI_ROOT = PROJECT_ROOT
 sys.path.insert(0, str(GUI_ROOT))
 
 import yolo_detection_worker as worker_module  # noqa: E402
