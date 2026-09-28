@@ -134,6 +134,7 @@ class BatchDetectionController:
         self._run_context = DetectionRunContext(
             self._token_counter, regression_set, regression_set.revision
         )
+        self.state.detection_run_token = self._run_context.run_token
         self._active_job = None
         self._prepared_job = None
         self._active_started_ns = None
@@ -268,7 +269,10 @@ class BatchDetectionController:
         if not self.matches_active_result(payload):
             return False
         image = self._image(self._active_job.image_order)
-        image.samples = [self._sample_from_dict(value) for value in payload.get("sample_results", [])]
+        image.samples = [
+            self._sample_from_dict(value, self._run_context.run_token)
+            for value in payload.get("sample_results", [])
+        ]
         image.errors = [self._error_from_dict(value) for value in payload.get("sample_errors", [])]
         image.status = ImageStatus.COMPLETED if image.samples else ImageStatus.FAILED
         if image.status == ImageStatus.COMPLETED:
@@ -327,8 +331,10 @@ class BatchDetectionController:
         self._active_started_ns = None
 
     @staticmethod
-    def _sample_from_dict(value):
+    def _sample_from_dict(value, detection_run_token=None):
         fields = dict(value)
+        fields.pop("detection_run_token", None)
+        fields["detection_run_token"] = detection_run_token
         fields["status"] = SampleStatus(fields.get("status", "valid"))
         for channel in ("r", "g", "b"):
             name = "status_{}".format(channel)

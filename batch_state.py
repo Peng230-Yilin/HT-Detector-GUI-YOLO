@@ -556,10 +556,17 @@ class SampleResult:
     status_b: ConcentrationStatus = ConcentrationStatus.MISSING_REGRESSION
     no_in_image: Optional[int] = None
     batch_no: Optional[int] = None
+    detection_run_token: Optional[int] = None
     status: SampleStatus = SampleStatus.VALID
     warnings: List[str] = field(default_factory=list)
 
     def __post_init__(self):
+        if self.detection_run_token is not None and (
+            isinstance(self.detection_run_token, bool)
+            or not isinstance(self.detection_run_token, int)
+            or self.detection_run_token < 1
+        ):
+            raise ValueError("detection_run_token must be a positive integer or None.")
         for channel in ("r", "g", "b"):
             concentration = getattr(self, "con_{}".format(channel))
             status = getattr(self, "status_{}".format(channel))
@@ -581,6 +588,7 @@ class SampleResult:
 
     def as_dict(self):
         value = asdict(self)
+        value.pop("detection_run_token", None)
         value["status"] = self.status.value
         for channel in ("r", "g", "b"):
             value["status_{}".format(channel)] = getattr(
@@ -745,6 +753,7 @@ class BatchState:
     detection_scope: DetectionScope
     numbering_mode: NumberingMode
     regression_set: RegressionSet
+    detection_run_token: Optional[int]
 
     def __init__(
         self,
@@ -754,6 +763,7 @@ class BatchState:
         detection_scope=DetectionScope.CURRENT_IMAGE,
         numbering_mode=NumberingMode.PER_IMAGE,
         regression_set=None,
+        detection_run_token=None,
     ):
         self.images = list(images) if images is not None else []
         self._current_image_index = None
@@ -767,6 +777,13 @@ class BatchState:
         )
         if not isinstance(self.regression_set, RegressionSet):
             raise TypeError("regression_set must be a RegressionSet.")
+        if detection_run_token is not None and (
+            isinstance(detection_run_token, bool)
+            or not isinstance(detection_run_token, int)
+            or detection_run_token < 1
+        ):
+            raise ValueError("detection_run_token must be a positive integer or None.")
+        self.detection_run_token = detection_run_token
         if current_image_index is _DEFAULT_INDEX:
             current_image_index = 0 if self.images else None
         self.current_image_index = current_image_index

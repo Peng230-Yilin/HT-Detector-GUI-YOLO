@@ -30,7 +30,6 @@ import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from scipy import stats
 import openpyxl
 
 from ui import ui_detectmain
@@ -54,6 +53,8 @@ from linear_series_state import (
     LinearSeriesPhase,
     LinearSeriesState,
 )
+from linear_plot_projection import build_linear_plot_projection
+from linear_plot_renderer import render_linear_plot
 
 
 _USE_CURRENT_RESULT = object()
@@ -82,6 +83,7 @@ LINEAR_WEIGHT_PATH = (
 LINEAR_MODE_SINGLE_IMAGE = "single_image"
 LINEAR_MODE_IMAGE_SERIES = "image_series"
 _LINEAR_MODES = (LINEAR_MODE_SINGLE_IMAGE, LINEAR_MODE_IMAGE_SERIES)
+_LINEAR_PLOT_CHANNEL_MODES = ("R", "G", "B", "RGB")
 TIME_DISPLAY_NONE = "none"
 TIME_DISPLAY_LINEAR = "linear"
 TIME_DISPLAY_DETECTION = "detection"
@@ -176,6 +178,18 @@ class DetectMain(QWidget):
         self._regression_result = None
         self._regression_dirty = False
         self._regression_session_state = RegressionSessionState()
+        try:
+            initial_settings, _warnings, _interface = load_effective_settings(
+                apply_to_module=False
+            )
+            initial_plot_channel = initial_settings.get("linear_plot_channel")
+        except Exception:
+            initial_plot_channel = "B"
+        self._linear_plot_channel_mode = (
+            initial_plot_channel
+            if initial_plot_channel in _LINEAR_PLOT_CHANNEL_MODES
+            else "B"
+        )
         self._linear_mode = LINEAR_MODE_SINGLE_IMAGE
         self._single_linear_action_text = self.ui.pushButton_4.text()
         self._single_linear_view_state = None
@@ -238,128 +252,7 @@ class DetectMain(QWidget):
 
 
 
-        # Linear regression: read source data (full precision for the fit)
-        lin_headers, lin_rows = self._read_excel(
-            GUI_RESOURCE_ROOT / 'interface/linear/table/linear_regression_table.xlsx'
-        )
-        ycol = self._first_color_index(lin_headers)
-        con_lin = [r[lin_headers.index("Con.")] for r in lin_rows]
-        y_channel = [r[ycol] for r in lin_rows]
-        y_label = lin_headers[ycol]
-        channel_color = self.CHANNEL_COLORS.get(y_label, '#2ca02c')
-        detect_color = self.CONTRAST_COLORS.get(y_label, '#ff7f0e')
-
-        # Linear regression display table: read from only_table/
-        disp_headers, disp_rows = self._read_excel(
-            GUI_RESOURCE_ROOT / 'interface/linear/only_table/linear_regression_table.xlsx')
-        self._populate_tableview(self.ui.tabviewOrig, disp_headers, disp_rows)
-
-
-
-        # plot the Chart
-        font = {'family': 'serif',
-                'color':  'black',
-                'weight': 'normal',
-                'size': 13,
-                }
-
-        x = con_lin
-        y = y_channel
-        slope, intercept, r, p, std_err = stats.linregress(x, y)
-        R2 = pow(r, 2)
-        def myfunc(x):
-            return slope*x+intercept
-        mymodel = list(map(myfunc, x))
-
-        text = "Y = {:.4f}*X+{:.2f}".format(slope, intercept)
-#        print('text=', text)
-#        print("y = {:.2f}*x+{:.2f}".format(slope, intercept))
-
-        # Detection: read detection-source data, compute predicted concentrations
-        det_headers, det_rows = self._read_excel(
-            GUI_RESOURCE_ROOT / 'interface/detect/table/detection_table.xlsx'
-        )
-        dcol = self._first_color_index(det_headers)
-        det_channel = [r[dcol] for r in det_rows]
-        con_pred = [(v - intercept) / slope for v in det_channel]
-        print('con: ', con_pred)
-
-#        plt.plot(x, y, 'k')
-        plt.title('Linear Regression and Detection of Real Samples', fontdict=font, fontsize=15) # 'Linear Regression and ML-assisted HT-Detection'
-
-        # Formula overlay: keep clear of the regression line by docking to the
-        # corner opposite the slope direction; axes-fraction coords keep it
-        # stable across data scales.
-        if slope >= 0:
-            tx, ha = 0.02, 'left'
-        else:
-            tx, ha = 0.98, 'right'
-        self.ax.text(tx, 0.96,
-                "Y = {:.4f} * X+{:.2f} ,  R$^2$ = {:.4f}".format(slope, intercept, R2),
-                transform=self.ax.transAxes,
-                ha=ha, va='top',
-                fontsize=16, fontstyle='italic', fontfamily='times new roman',
-                color=(0, 0, 0, 1),
-                bbox=dict(facecolor=channel_color, alpha=0.5, edgecolor='none',
-                          boxstyle='round,pad=0.3'))
-        # plt.text(61, 143, r'$\cos(2 \pi t) \exp(-t)$', fontdict=font)
-        plt.xlabel('Concentration of AA (μM)', fontdict=font, fontsize=13) #'Concentration of Hg$^{2+}$ (μM)'
-        plt.ylabel('{} Value'.format(y_label), fontdict=font, fontsize=13)
-
-
-
-        plt.scatter(x, y, color=channel_color, linewidths=4, zorder=1)
-        plt.plot(x, mymodel, color=channel_color, linewidth=3, linestyle='--', alpha=0.7, zorder=2)
-        plt.scatter(con_pred, det_channel, color=detect_color, linewidths=4, zorder=3)
-
-
-
-
-        plt.legend(('experimental data', 'linear regression', 'detection result'),
-                   loc='lower right', shadow=True)
-
-        marker_color = detect_color
-        marker_size = 9   # one size smaller than before
-        # 28 px between bands comfortably exceeds the rendered label-box height
-        # (~19 px at fontsize 9 with pad=1) so adjacent-band labels cannot overlap
-        # vertically. Anchored at each point's x preserves left-to-right order; x
-        # collisions bump the label to the next band. label_half_w stays pessimistic
-        # so tight clusters still fan out across distinct bands.
-        dx_global = -3
-        order = sorted(range(len(con_pred)), key=lambda i: con_pred[i])
-        x_span = (max(con_pred) - min(con_pred)) if len(con_pred) > 1 else 1.0
-        label_half_w = max(x_span * 0.11, 1e-6)
-        dy_cycle = [-26, -54, -82, -110, 26, 54, 82, 110]
-        band_intervals = {dy: [] for dy in dy_cycle}
-        assigned_dy = [dy_cycle[0]] * len(con_pred)
-        for idx in order:
-            xL = con_pred[idx] - label_half_w
-            xR = con_pred[idx] + label_half_w
-            for dy in dy_cycle:
-                collides = any(max(xL, l) < min(xR, r) for l, r in band_intervals[dy])
-                if not collides:
-                    band_intervals[dy].append((xL, xR))
-                    assigned_dy[idx] = dy
-                    break
-        for i, (cx, cy) in enumerate(zip(con_pred, det_channel)):
-            plt.annotate('({:.2f},{:.2f})'.format(cx, cy),
-                         xy=(cx, cy), xytext=(dx_global, assigned_dy[i]),
-                         textcoords='offset points',
-                         ha='center', va='center',
-                         fontsize=marker_size, color=marker_color,
-                         bbox=dict(facecolor='white', alpha=0.75,
-                                   edgecolor='none', pad=1.0),
-                         arrowprops=dict(arrowstyle='-', color='lightgray',
-                                         lw=0.8, linestyle='--', alpha=0.9))
-
-        # Modest axis padding so labels stay inside the plot frame at any window size.
-        y0, y1 = self.ax.get_ylim()
-        yr = y1 - y0
-        self.ax.set_ylim(y0 - yr * 0.12, y1 + yr * 0.06)
-
-
-        # Render into the embedded Qt canvas only — no standalone pyplot window.
-        self.canvas.draw()
+        # The chart remains a placeholder until a confirmed regression is accepted.
 
 
 
@@ -560,6 +453,8 @@ class DetectMain(QWidget):
                 QHeaderView.Stretch
             )
         DetectMain._refresh_detection_duration_display(self)
+        if DetectMain._active_linear_regression_set(self) is not None:
+            DetectMain._plot_regression_result(self)
         self._update_save_button()
 
     def _install_detection_browser(self):
@@ -711,6 +606,8 @@ class DetectMain(QWidget):
         )
         DetectMain._refresh_detection_duration_display(self, image)
         DetectMain._refresh_detection_browser(self)
+        if DetectMain._active_linear_regression_set(self) is not None:
+            DetectMain._plot_regression_result(self)
         self._update_save_button()
 
     @Slot()
@@ -1904,60 +1801,78 @@ class DetectMain(QWidget):
         finally:
             self._set_active_worker_task(None)
 
-    def _regression_plot_data(self):
-        payload = self._regression_result
+    @property
+    def linear_plot_channel_mode(self):
+        return self._linear_plot_channel_mode
+
+    def _active_linear_regression_set(self):
+        session = getattr(self, "_regression_session_state", None)
+        active = getattr(session, "active_regression_set", None)
+        return active if isinstance(active, RegressionSet) else None
+
+    def _set_linear_plot_channel_mode(self, mode):
+        if type(mode) is not str or mode not in _LINEAR_PLOT_CHANNEL_MODES:
+            raise ValueError("Linear Plot Channel must be R, G, B, or RGB.")
+        self._linear_plot_channel_mode = mode
+        if self._active_linear_regression_set() is not None:
+            self._plot_regression_result()
+        return mode
+
+    def _linear_calibration_projection_source(self, active_regression_set):
+        payload = getattr(self, "_regression_result", None)
         if not isinstance(payload, dict):
-            raise ValueError("No linear regression result is available.")
-
+            return (), None
+        payload_regression_set = payload.get("regression_set")
+        if not isinstance(payload_regression_set, RegressionSet):
+            return (), None
+        revision = payload_regression_set.revision
+        if revision != active_regression_set.revision:
+            return (), revision
         samples = payload.get("samples")
-        formulas = payload.get("formulas")
-        channel = payload.get("selected_channel")
-        if not isinstance(samples, (list, tuple)) or not samples:
-            raise ValueError("The regression result contains no samples.")
-        if channel not in self.REGRESSION_CHANNEL_FIELDS:
-            raise ValueError("The regression result has an invalid selected channel.")
-        if not isinstance(formulas, dict) or not isinstance(formulas.get(channel), dict):
-            raise ValueError("The regression formula for channel {} is missing.".format(channel))
+        if not isinstance(samples, (list, tuple)):
+            return (), revision
+        return tuple(samples), revision
 
-        formula = formulas[channel]
-        try:
-            slope = float(formula["slope"])
-            intercept = float(formula["intercept"])
-            r_squared = float(formula["R2"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("The regression formula is incomplete or invalid.") from error
-        if not all(np.isfinite(value) for value in (slope, intercept, r_squared)):
-            raise ValueError("The regression formula contains non-finite values.")
+    def _selected_detection_image_order(self):
+        controller = getattr(self, "_batch_controller", None)
+        selection_key = getattr(self, "_detection_selected_key", None)
+        run_token = (
+            None
+            if controller is None
+            else getattr(controller.state, "detection_run_token", None)
+        )
+        if (
+            controller is None
+            or not isinstance(selection_key, tuple)
+            or len(selection_key) != 3
+            or selection_key[0] != run_token
+        ):
+            return None
+        image_order = selection_key[1]
+        if type(image_order) is not int or image_order < 1:
+            return None
+        return image_order
 
-        channel_field = self.REGRESSION_CHANNEL_FIELDS[channel]
-        plot_samples = []
-        for sample in samples:
-            if not isinstance(sample, dict):
-                raise ValueError("The regression result contains an invalid sample.")
-            try:
-                concentration = float(sample["Con."])
-                intensity = float(sample[channel_field])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError(
-                    "A regression sample is missing valid concentration or {} data.".format(
-                        channel_field
-                    )
-                ) from error
-            if not np.isfinite(concentration) or not np.isfinite(intensity):
-                raise ValueError("A regression sample contains non-finite plot data.")
-            plot_samples.append((concentration, intensity, sample.get("included") is True))
-
-        included = [sample for sample in plot_samples if sample[2]]
-        if len(included) < 2 or len({sample[0] for sample in included}) < 2:
-            raise ValueError("At least two distinct included concentrations are required to plot.")
-        return channel, channel_field, plot_samples, included, slope, intercept, r_squared
+    def _build_linear_plot_projection(self):
+        active = self._active_linear_regression_set()
+        if active is None:
+            raise ValueError("No active RegressionSet is available for plotting.")
+        samples, calibration_revision = (
+            self._linear_calibration_projection_source(active)
+        )
+        controller = getattr(self, "_batch_controller", None)
+        batch_state = None if controller is None else controller.state
+        return build_linear_plot_projection(
+            active_regression_set=active,
+            calibration_samples=samples,
+            calibration_revision=calibration_revision,
+            batch_state=batch_state,
+            plot_mode=self._linear_plot_channel_mode,
+            selected_image_order=self._selected_detection_image_order(),
+        )
 
     def _has_valid_regression_result(self):
-        try:
-            self._regression_plot_data()
-        except ValueError:
-            return False
-        return True
+        return self._active_linear_regression_set() is not None
 
     @Slot()
     def _plot_regression_result(self):
@@ -1967,59 +1882,20 @@ class DetectMain(QWidget):
         ):
             return
         try:
-            (channel, channel_field, _plot_samples, included,
-             slope, intercept, r_squared) = self._regression_plot_data()
-        except ValueError as error:
+            projection = self._build_linear_plot_projection()
+        except (TypeError, ValueError):
             self._show_calibration_plot_placeholder()
             self.ui.pushButton_7.setEnabled(False)
             self._update_save_button()
-            QMessageBox.critical(self, "Plot error", str(error))
             return
 
-        DetectMain._refresh_linear_duration_display(self)
-
-        used_x = [sample[0] for sample in included]
-        used_y = [sample[1] for sample in included]
-        color = self.CHANNEL_COLORS[channel_field]
-
-        self.ax.clear()
-        self.ax.set_axis_on()
-        self.ax.scatter(
-            used_x, used_y, color=color, marker="o", s=55,
-            label="Used in regression (n={})".format(len(included)), zorder=3,
+        if self._regression_suptitle is not None:
+            self._regression_suptitle.remove()
+            self._regression_suptitle = None
+        render_linear_plot(self.ax, projection)
+        self.figure.subplots_adjust(
+            left=0.14, right=0.96, bottom=0.16, top=0.80
         )
-        line_x = np.array([min(used_x), max(used_x)], dtype=float)
-        line_y = slope * line_x + intercept
-        self.ax.plot(
-            line_x, line_y, color=color,
-            linewidth=2.2, label="Linear fit", zorder=2,
-        )
-        sign = "+" if intercept >= 0 else "-"
-        equation = "y = {:.4f}x {} {:.4f}".format(slope, sign, abs(intercept))
-        title = "Linear Regression – {} Channel\n{}    R² = {:.4f}".format(
-            channel_field, equation, r_squared
-        )
-        if self._regression_suptitle is None:
-            self._regression_suptitle = self.figure.suptitle(title, y=0.97)
-        else:
-            self._regression_suptitle.set_text(title)
-        self.figure.subplots_adjust(left=0.14, right=0.96, bottom=0.16, top=0.78)
-        self.ax.set_xlabel("Concentration")
-        self.ax.set_ylabel("{} Intensity".format(channel_field))
-        self.ax.grid(True, alpha=0.3)
-        self.ax.legend()
-
-        def padded_limits(values):
-            lower = float(min(values))
-            upper = float(max(values))
-            span = upper - lower
-            margin = span * 0.05 if span > 0 else max(abs(lower) * 0.05, 0.5)
-            return lower - margin, upper + margin
-
-        # Limits are rebuilt from the current included points and fit endpoints
-        # after every clear; excluded samples and previous axes state cannot affect them.
-        self.ax.set_xlim(padded_limits(list(used_x) + list(line_x)))
-        self.ax.set_ylim(padded_limits(list(used_y) + list(line_y)))
         self.canvas.draw()
         self._regression_plot_has_result = True
         self.ui.pushButton_7.setEnabled(True)

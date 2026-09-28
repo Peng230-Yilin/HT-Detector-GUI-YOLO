@@ -1,0 +1,460 @@
+Phase 1C2 - Linear R/G/B/RGB Plot GUI and Renderer Integration
+Implementation Report
+
+PHASE1C2_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C2_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+1. Preconditions and scope
+
+PHASE1C1_CORE_REVIEW_FULLY_READ = YES
+PHASE1C1_CORE_REVIEW_RESULT = PASS_WITH_RECORDED_HISTORICAL_PROCEDURAL_DEVIATION
+ELIGIBLE_FOR_PHASE1C2_IMPLEMENTATION = YES
+
+The four Phase 1C1 handoff identities were verified before modification. Their
+size and SHA-256 values matched exactly, and all three Phase 1C1 Python files
+and the Phase 1C1 report remain unchanged.
+
+No Git command, network operation, GUI execution, main-program execution,
+model load, inference, Camera access, QApplication construction, QWidget
+construction, QThread construction, DetectMain construction, or worker
+construction was performed during implementation or validation.
+
+2. Modified and added files
+
+MODIFIED:
+- detectmain.py
+  before: bytes=167805
+  before UTC mtime=2026-09-26T06:21:17.2354336Z
+  before SHA-256=963c66fd50e2c691149a623e0a33f42d663165ce534006f682e0aa6becb5c021
+  after: bytes=161563
+  after UTC mtime=2026-09-26T14:50:20.7904532Z
+  after SHA-256=42f10758b94a597956e801189f70041027076118af69450e0d8c3cf15d2a5928
+- detectionwindow.py
+  before: bytes=35511
+  before UTC mtime=2026-09-09T14:42:59.0840319Z
+  before SHA-256=757350f8f987b4f7f36832858e7c108936156e2f9ce240675b33ce253f501cb0
+  after: bytes=37326
+  after UTC mtime=2026-09-26T14:50:44.0932482Z
+  after SHA-256=0c9708cda7de56dac5ad3660cfb006f83d192cf3eb25a6fe5cfd4f9956a50a52
+
+ADDED_BUSINESS_FILES:
+- linear_plot_renderer.py
+  before: absent
+  after: bytes=4696
+  after UTC mtime=2026-09-26T14:57:12.8133469Z
+  after SHA-256=14cf288b827a7413b9c8f6c8d8517343249c547fd2d1bcd47d06031133e45969
+- tests/test_phase1c2_linear_plot_renderer.py
+  before: absent
+  after: bytes=10729
+  after UTC mtime=2026-09-26T14:57:12.8196444Z
+  after SHA-256=17191655cdc7a69f6fed99bb19f5a0081f0b36e0c4ac19941bea31b53fde48ea
+- tests/test_phase1c2_plot_integration.py
+  before: absent
+  after: bytes=21933
+  after UTC mtime=2026-09-26T14:57:12.8216373Z
+  after SHA-256=88fad32446be805d900187a8a87b7b1fe312cd456d9107be4e0e4b239cb4c6a9
+
+AUTHORIZED_HANDOFF_ARTIFACT:
+- PHASE1C2_IMPLEMENTATION_REPORT.txt
+
+No other project path was modified or added.
+
+3. Removed startup demonstration authority
+
+The pre-implementation detectmain.py constructor lines 241-363 were removed.
+That exact block previously:
+- opened interface/linear/table/linear_regression_table.xlsx;
+- opened interface/linear/only_table/linear_regression_table.xlsx;
+- opened interface/detect/table/detection_table.xlsx;
+- selected a demonstration channel;
+- ran scipy.stats.linregress;
+- calculated demonstration concentrations from demonstration intensities;
+- plotted demonstration calibration and Detection data;
+- drew the demonstration canvas before the real empty UI state replaced it.
+
+The constructor now leaves _regression_result=None, creates no demonstration
+RegressionSet, calculates no demonstration concentration, opens no demonstration
+XLSX, and reaches the existing reset path which displays the placeholder.
+The saved-regression legacy fallback remains in the Detection regression-session
+state machine and was not modified.
+
+4. Linear Plot Channel authority and menu
+
+The only runtime authority is:
+
+self._linear_plot_channel_mode
+
+Accepted values are exactly R, G, B, and RGB. At DetectMain construction,
+load_effective_settings(apply_to_module=False) is read once and its R/G/B
+color_channel is copied as an initialization snapshot. Any other value or read
+failure falls back to B. No Linear Plot mode is persisted.
+
+The Detection setting settings["color_channel"] is never written by the plot
+mode setter. Later Interface changes do not update Linear Plot mode, and later
+Linear Plot changes do not update the Detection setting.
+
+detectionwindow.py dynamically adds this hierarchy to the existing Linear menu:
+
+Edit -> Linear -> Plot Channel -> R / G / B / RGB
+
+The four QActions are checkable and belong to one exclusive QActionGroup. Their
+checked state is a blocked-signal mirror synchronized by DetectMain; QAction
+state is not an authority. The existing Linear and Detection menus and generated
+UI files were not modified.
+
+5. Projection integration and revision gates
+
+The production data flow is:
+
+self._regression_session_state.active_regression_set
++ revision-matched _regression_result["samples"]
++ self._batch_controller.state
++ self._detection_selected_key[1] after run-token validation
++ self._linear_plot_channel_mode
+-> build_linear_plot_projection(...)
+-> LinearPlotProjection
+-> render_linear_plot(self.ax, projection)
+-> existing canvas.draw()
+
+Plot formula fields are not read from _regression_result["formulas"]. Curves are
+therefore sourced only from the active RegressionSet through the Phase 1C1 core.
+
+CALIBRATION_REVISION_GATE:
+- the payload must contain a formal RegressionSet;
+- its revision must equal the active RegressionSet revision;
+- only then are the payload samples supplied to the projection core;
+- missing or mismatched payload identity supplies no calibration samples;
+- the active curves remain available.
+
+DETECTION_REVISION_GATE:
+- BatchDetectionController.state is passed directly to the Phase 1C1 core;
+- SampleResult is the only Detection point source;
+- Phase 1C1 suppresses all points and marks them stale on revision mismatch;
+- no concentration is recalculated and no numbering is reassigned.
+
+SELECTED_IMAGE_ORDER_SOURCE:
+- only the formal three-part _detection_selected_key is consulted;
+- its run token must match BatchDetectionController.run_token;
+- only key element 1 supplies image_order;
+- current_image, current processing index, file name, path, combobox text, and
+  table selection are not fallback authorities.
+
+6. Pure redraw result
+
+The Plot button and Linear Plot Channel setter call the same projection and
+renderer path. The path contains no call to:
+- _refresh_linear_duration_display;
+- a clock, active_elapsed_ms, RegressionTiming, or duration mutation;
+- regression_requested or detection_requested;
+- RegressionSet.calculate_all or RegressionChannelModel.calculate;
+- number assignment;
+- a worker, model, Camera, file loader, XLSX loader, or save function.
+
+When no active RegressionSet exists, the setter updates the authoritative mode
+and action mirror without a modal dialog and leaves the placeholder. With an
+active RegressionSet, it requests only the pure redraw path.
+
+7. Renderer result
+
+linear_plot_renderer.py imports only LinearPlotProjection. It has no Qt,
+Matplotlib backend, BatchState, DetectMain, settings, XLSX, clock, file, model,
+worker, Camera, or subprocess dependency. It never draws a canvas and never
+saves a file.
+
+R/G/B mode:
+- only the selected curve, included calibration points, and matching Detection
+  points are rendered;
+- titles and Y labels use Red, Green, or Blue Channel/Intensity;
+- X label is Concentration;
+- fit legend includes the equation and projection R-squared value.
+
+RGB mode:
+- channel order is fixed R, G, B;
+- colors are red, green, blue;
+- all three calibration groups, fit lines, and Detection groups share their
+  channel base color;
+- calibration marker is o and Detection marker is X;
+- Detection legend entries are grouped per channel rather than per point;
+- title is Linear Regression - RGB Channels and Y label is RGB Intensity.
+
+An unavailable curve never fabricates a line and never prevents sibling channels
+from rendering. RANGE_UNAVAILABLE finite Detection points remain renderable.
+No current-image highlight, status styling, numbering label, hover, click,
+tooltip, or user-configurable plot style was added.
+
+8. Save Linear and protected behavior
+
+The existing _build_linear_export_bytes function remains byte-for-logical-source
+identical. It still calls _plot_regression_result() immediately before
+canvas.print_png(), so standard_curve.png reflects the current R/G/B/RGB mode
+and matching Detection overlay. The XLSX builder, validation, transaction,
+rollback, temporary-directory, atomic replacement, and _save_linear_result
+functions were not modified. No Plot Channel field was added to XLSX.
+
+The following pre/post AST source hashes are identical:
+- _build_detection_workbook_bytes: 5626692e11037af8937d0329e9233c001bf124768ed0114207021019d4b2b3f9
+- _validate_detection_workbook_bytes: 613d6c7797c0af5bb2d2c73b24e8b500b086a2c81aefd4e9cd3a108bf044ee47
+- _build_detection_export_bytes: ee630526c18084b4240c04cd451a9740c91166f303f581b4c31f26af97e65438
+- _commit_detection_export: af9a90a0449e0d4c59d806857b101032f93d18fcc88c197a240c353f610c71c4
+- _save_detection_result: 9b9f7792ea5676d04a906c0de5c6babc6d15a3a9d2f229bdf71e6784d7bb2c40
+- _build_linear_workbook_bytes: ce91d3f7d495ca3fc3bd857b0ee631495b5e1f18bd13f2417aeb3bbda0163b15
+- _validate_linear_workbook_bytes: 49d4582495311883bd1b1cf2843d8c36fc0888786beed1093f035fcd648c65fa
+- _build_linear_export_bytes: fe509b7dd037bd3d04e5a38de23b4aacbdae75c43958ff922f28f779f7bcfe74
+- _commit_linear_export: b3ad2f4d0b44298967476989947732fdc24637ae75ce27c979aa02449b0ea104
+- _save_linear_result: ae92c7d87a5da7a177525d5b9063ff362a17d130131c1e179dd6e2b888ad5c83
+- _on_regression_finished: f3efe3e5d8eeb98d96bc938dee7a879f57eb7b80db07a0b00868d239b8dd6cca
+- _on_regression_failed: ce6c4225c696cf9748f89f3b02cefeb3b22a9dc0954f456fdf5ce187f25a2d66
+- _on_detection_finished: 39064cb4beac4c0604714aaf9a47b4fcd48176ff9445f203f051a497f410c5d2
+- _on_detection_failed: 4464cf5eea825f21a53099e113ea3cc2984218ef61c44cbf4c5b133c7d59b57e
+- _show_detection_image: fe1c11efb6feb31a686c1cb203a4d6b8e3582b8c8942ceed82ad513b8652202d
+- _refresh_detection_duration_display: 161fe9441d2142d9991316827b5a1003f9a27ae2800b0dedd415e5458ca71666
+- _refresh_linear_duration_display: 2140285587401a11bcfcae49f77dcf0d1a42b1417076864782583a4e78f0793b
+- _set_shared_time_display: 0830c265e9570ba9258a42f7453907d823c10b1f4f8e3579bd38478544270c3b
+- _refresh_shared_time_display: 7371a4b600331895da7201563c4d406f30cdaf34f36aa436a18ef3499a030f37
+- _apply_result_pane_view: 8d85b8467956725ae7aa9b1aa15b5be8775419972fbaea98db63f6ec5517f936
+
+This protects Detection and Linear XLSX schemas, Linear G and Detection N blank
+rules, integer-millisecond time columns, save transactions, callbacks, table
+restoration, and shared time display behavior.
+
+9. Development failure record
+
+INITIAL_NEW_TEST_RUN:
+- exact nodes: 47
+- passed: 46
+- failed: 1
+- errors: 0
+- skipped: 0
+
+FAILED_NODE:
+tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_new_tests_do_not_import_or_create_qt_gui_objects
+
+CAUSE:
+The test scanned both test modules as raw source and matched the literal
+"PySide6" inside the renderer test's own forbidden-import set. No production
+code failure or GUI import occurred.
+
+FIX:
+The self-referential string scan was replaced with AST inspection of actual
+Import, ImportFrom, Call, and string nodes. The exact failed node then passed.
+
+10. AST and final authoritative tests
+
+Python executable: project .venv/Scripts/python.exe
+Flags/environment: python -B; PYTHONDONTWRITEBYTECODE=1
+
+AST_OK detectmain.py
+AST_OK detectionwindow.py
+AST_OK linear_plot_renderer.py
+AST_OK tests/test_phase1c2_linear_plot_renderer.py
+AST_OK tests/test_phase1c2_plot_integration.py
+AST_ERROR_COUNT = 0
+
+ORIGINAL_PHASE1C1_NODE_COUNT = 55
+NEW_PHASE1C2_NODE_COUNT = 47
+FINAL_NODE_COUNT = 102
+FINAL_UNIQUE_NODE_COUNT = 102
+FINAL_DUPLICATE_NODE_COUNT = 0
+FINAL_MISSING_NODE_COUNT = 0
+FINAL_TEST_PASS_COUNT = 102
+FINAL_TEST_FAIL_COUNT = 0
+FINAL_TEST_ERROR_COUNT = 0
+FINAL_TEST_SKIP_COUNT = 0
+FINAL_AUTHORITATIVE_TEST_RESULT = PASS
+
+Final exact node IDs in execution order:
+1. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_revision_mismatch_rejects_only_standard_points
+2. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_sample_is_frozen_and_normalizes_finite_values
+3. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_source_list_and_dict_mutation_cannot_change_projection
+4. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_curve_formula_r_squared_range_and_status_come_from_active_set
+5. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_failed_and_empty_completed_images_do_not_create_points
+6. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_invalid_plot_modes_are_rejected
+7. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_missing_selected_order_does_not_fall_back_to_current_index
+8. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_modes_have_exact_fixed_curve_order
+9. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_none_nan_and_infinite_values_do_not_generate_points
+10. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_numbering_mode_and_stored_numbers_are_copied_not_reassigned
+11. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_only_included_calibration_samples_become_channel_points
+12. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_plottable_statuses_are_preserved_without_reclassification
+13. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_projection_and_nested_values_are_frozen_tuples
+14. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_rgb_points_use_exact_channel_coordinates_and_shared_identity
+15. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_same_filename_and_repeated_path_are_distinguished_by_image_order
+16. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_single_channel_mode_never_projects_other_channels
+17. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_unplottable_channel_does_not_suppress_other_channels
+18. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_builder_never_calls_formula_or_number_assignment_helpers
+19. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_calibration_and_detection_revision_gates_are_independent
+20. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_matching_batch_is_not_stale
+21. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_mismatched_batch_records_the_real_revision_conflict
+22. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_legacy_targets_and_display_pollution_are_never_read
+23. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_matching_revision_projects_every_completed_formal_sample
+24. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_missing_and_invalid_regression_statuses_are_copied_to_curves
+25. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_contains_no_io_clock_worker_gui_or_model_calls
+26. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_direct_imports_stay_within_pure_allowlist
+27. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_no_batch_has_no_detection_revision_and_is_not_stale
+28. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_construction_does_not_mutate_batch_or_samples
+29. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_is_detached_from_later_batch_mutation
+30. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_never_recalculates_old_detection_points
+31. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_suppresses_detection_points_and_marks_stale
+32. tests.test_batch_state.CompatibilityTests.test_legacy_single_image_target_fields_are_unchanged
+33. tests.test_batch_state.NaturalSortTests.test_batch_state_factory
+34. tests.test_batch_state.NaturalSortTests.test_case_extension_directories_and_duplicates_are_deterministic
+35. tests.test_batch_state.NaturalSortTests.test_current_image_index_contract
+36. tests.test_batch_state.NaturalSortTests.test_empty_and_single
+37. tests.test_batch_state.NaturalSortTests.test_empty_batch_index_and_current_image
+38. tests.test_batch_state.NaturalSortTests.test_invalid_constructor_index_and_list_mutation
+39. tests.test_batch_state.NaturalSortTests.test_natural_order_and_image_order
+40. tests.test_batch_state.NaturalSortTests.test_original_filename_is_not_modified
+41. tests.test_batch_state.NumberingTests.test_assign_image_numbers_is_spatial
+42. tests.test_batch_state.NumberingTests.test_failed_image_does_not_consume_batch_number
+43. tests.test_batch_state.NumberingTests.test_failed_stale_sample_is_cleared_without_batch_gap
+44. tests.test_batch_state.NumberingTests.test_per_image_resets_and_batch_continues
+45. tests.test_batch_state.NumberingTests.test_valid_error_valid_numbers_only_valid_samples
+46. tests.test_batch_state.PairingTests.test_all_input_permutations_have_identical_complete_result
+47. tests.test_batch_state.PairingTests.test_horizontal_overlap_fallback_can_pair_uniquely
+48. tests.test_batch_state.PairingTests.test_multiple_candidates_are_ambiguous_not_forced
+49. tests.test_batch_state.PairingTests.test_no_candidate_records_both_unmatched_targets
+50. tests.test_batch_state.PairingTests.test_unique_center_containment_pair
+51. tests.test_batch_state.RegressionSetTests.test_all_eight_statuses_have_fixed_semantics
+52. tests.test_batch_state.RegressionSetTests.test_mixed_confirmed_sources_are_rejected
+53. tests.test_batch_state.RegressionSetTests.test_three_distinct_equations_and_inclusive_boundaries
+54. tests.test_batch_state.SpatialSortTests.test_single_row_left_to_right
+55. tests.test_batch_state.SpatialSortTests.test_two_rows_top_then_bottom_and_shuffled_input
+56. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_single_channel_modes_draw_only_the_selected_channel
+57. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_rgb_uses_fixed_red_green_blue_order
+58. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_three_distinct_formulas_do_not_cross_channels
+59. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_calibration_point_coordinates_are_exact
+60. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_point_coordinates_are_exact
+61. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_calibration_and_detection_markers_are_distinct
+62. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_rgb_uses_fixed_channel_colors_for_every_artist
+63. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_legend_entry_is_not_repeated_per_point
+64. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_fit_legend_contains_projection_equation_and_r_squared
+65. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_unavailable_channel_does_not_stop_other_channels
+66. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_no_detection_points_still_draws_the_curve
+67. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_stale_projection_never_renders_old_detection_points
+68. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_range_unavailable_detection_point_remains_renderable
+69. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_does_not_modify_projection
+70. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_imports_only_projection_and_standard_library
+71. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_never_draws_canvas_or_saves_files
+72. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_linear_plot_channel_has_one_runtime_authority_field
+73. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_only_exact_r_g_b_rgb_modes_are_accepted
+74. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_menu_hierarchy_is_edit_linear_plot_channel
+75. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_channel_action_group_is_exclusive
+76. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_all_four_plot_channel_actions_are_checkable
+77. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_action_checked_state_is_only_a_mirror
+78. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_setter_synchronizes_actions_and_redraws_only_with_active_regression
+79. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_mode_never_writes_detection_color_channel_setting
+80. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_color_channel_cannot_write_linear_plot_mode
+81. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_initial_mode_is_one_time_detection_setting_snapshot_with_b_fallback
+82. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_reads_active_regression_set_directly
+83. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_never_reads_regression_result_formulas
+84. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_calibration_revision_gate_rejects_missing_and_stale_samples
+85. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_projection_builder_receives_only_authoritative_inputs
+86. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_detection_points_source_is_controller_batch_state
+87. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_selected_image_order_comes_only_from_formal_selection_key
+88. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_menu_redraw_paths_do_not_read_clocks
+89. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_menu_redraw_paths_emit_no_worker_signal
+90. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_does_not_load_models
+91. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_does_not_call_formula_file_loader
+92. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_save_linear_reuses_current_plot_renderer_before_print_png
+93. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_save_transactions_xlsx_callbacks_and_time_functions_are_unchanged
+94. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_linear_and_detection_xlsx_schema_functions_are_unchanged
+95. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_both_gui_result_tables_keep_five_columns
+96. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_shared_time_display_structure_is_unchanged
+97. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_reads_demo_xlsx
+98. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_builds_demo_regression_set
+99. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_calculates_demo_concentrations
+100. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_ui_and_generated_ui_files_are_unchanged
+101. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_phase1c1_core_files_are_unchanged
+102. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_new_tests_do_not_import_or_create_qt_gui_objects
+
+No unittest discovery, pytest discovery, module-level fuzzy selection, GUI test,
+offscreen test, main program, model, Camera, tests/test_batch_detection_flow.py,
+or QUAL7 run was used.
+
+11. File format
+
+- detectmain.py: UTF-8 without BOM; CRLF only; exactly one final newline.
+- detectionwindow.py: UTF-8 without BOM; original mixed-line-ending state
+  preserved. Before: CRLF=586, bare LF=278. After: CRLF=630, bare LF=278.
+  The unchanged bare-LF count proves no whole-file normalization occurred;
+  the 44 added CRLF lines are confined to the new menu integration.
+- linear_plot_renderer.py: UTF-8 without BOM; CRLF only; one final newline.
+- tests/test_phase1c2_linear_plot_renderer.py: UTF-8 without BOM; CRLF only;
+  one final newline.
+- tests/test_phase1c2_plot_integration.py: UTF-8 without BOM; CRLF only;
+  one final newline.
+
+12. Project integrity before the report artifact
+
+BASELINE:
+- non-.git files: 37543
+- first-party Python files: 43
+- .pyc files: 9818
+- PNG files: 1373
+- XLSX files: 56
+- .pytest_cache directories: 0
+- transaction directories: 0
+- full manifest SHA-256:
+  aef4e7cb53910f23a4758db064ac7a2b16856232581e33e0aaa2ab58aa5d2e12
+- protected files excluding all six authorized paths: 37541
+- protected manifest SHA-256:
+  00e325f627a0ba6151f83d1a78bd5f0d9093c95f1944eedf108c7adb9ec691fc
+
+POST_IMPLEMENTATION_BEFORE_HANDOFF_REPORT:
+- non-.git files: 37546
+- first-party Python files: 46
+- .pyc files: 9818
+- PNG files: 1373
+- XLSX files: 56
+- .pytest_cache directories: 0
+- transaction directories: 0
+- full manifest SHA-256:
+  1edd8e70775f53f65b66b9064a701ca12ebd0e11008a6c778235eb27222051ad
+- protected files excluding all six authorized paths: 37541
+- protected manifest SHA-256:
+  00e325f627a0ba6151f83d1a78bd5f0d9093c95f1944eedf108c7adb9ec691fc
+- protected manifest matches baseline: YES
+
+The authorized handoff report adds exactly one non-business file after this
+snapshot. Its final bytes/SHA-256 and the final complete manifest are reported
+in the delivery response because embedding them in this file would be
+self-referential.
+
+13. Model identities
+
+- weights/cuvette_Peng/yolov8n_train/weights/best.pt
+  bytes: 6279129
+  SHA-256: 582a0f22c8fcc4ed5623d7e6e87069c8c6e38a7bc3199fc94590de90fb333e31
+- YOLO_Detection_Core/weights/cuvette_huili/yolov8n_train/weights/best.pt
+  bytes: 6281497
+  SHA-256: ebfb9c0ef8c6d758ecf063831df7fdb8fc81abc0622450cc49bed93698b51f2a
+
+14. Prohibited execution and object counters
+
+GIT_COMMANDS_EXECUTED = 0
+NETWORK_OPERATIONS = 0
+QAPPLICATION_CREATED = 0
+QWIDGET_CREATED = 0
+QTHREAD_CREATED = 0
+DETECTMAIN_CREATED = 0
+YOLO_WORKER_CREATED = 0
+OFFSCREEN_GUI_EXECUTED = 0
+VISIBLE_GUI_EXECUTED = 0
+MAIN_PROGRAM_RUNS = 0
+MODEL_LOADS = 0
+MODEL_INFERENCES = 0
+CAMERA_ACCESSES = 0
+UNITTEST_DISCOVERY_RUNS = 0
+PYTEST_RUNS = 0
+QUAL7_RUNS = 0
+
+15. Completion boundary
+
+PHASE1C2_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C2_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+NEXT_REQUIRED_STEP = In a new Codex conversation, perform the Phase 1C2 independent read-only review.
+
+Phase 1C is not complete. Manual validation and items 17-22 are not authorized
+until the independent Phase 1C2 review explicitly authorizes manual validation.

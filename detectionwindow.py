@@ -493,7 +493,12 @@ class DetectWindow(QMainWindow):
         dialog = InterfaceSettingsDialog(self)
         self._interface_settings_dialog = dialog
         try:
-            dialog.exec()
+            result = dialog.exec()
+            if result == QDialog.Accepted:
+                settings = dialog.saved_settings
+                self._detectMain._set_linear_plot_channel_mode(
+                    settings["linear_plot_channel"]
+                )
         finally:
             self._interface_settings_dialog = None
             dialog.deleteLater()

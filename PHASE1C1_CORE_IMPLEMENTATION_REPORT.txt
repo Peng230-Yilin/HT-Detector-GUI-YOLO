@@ -1,0 +1,305 @@
+Phase 1C1 - Linear Plot Immutable Projection Core
+Core Implementation Report
+
+PHASE1C1_CORE_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C1_CORE_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+1. Scope and prior audit
+
+PHASE1C0_REPORT_FULLY_READ = YES
+PHASE1C0_BOUNDARIES_APPLIED = YES
+USER_VISIBLE_CHANGES = NO
+DETECTMAIN_INTEGRATION_PERFORMED = NO
+MENU_INTEGRATION_PERFORMED = NO
+MATPLOTLIB_INTEGRATION_PERFORMED = NO
+SAVE_LINEAR_INTEGRATION_PERFORMED = NO
+
+The implementation is limited to immutable projection data, authoritative source
+selection, revision gates, a pure projection builder, and pure unittest coverage.
+
+2. Files
+
+ADDED_BUSINESS_IMPLEMENTATION_FILES:
+- linear_plot_projection.py
+- tests/test_linear_plot_projection.py
+- tests/test_linear_plot_lifecycle.py
+
+MODIFIED_PREEXISTING_FILES = NO
+
+AUTHORIZED_REVIEW_HANDOFF_FILE:
+- PHASE1C1_CORE_IMPLEMENTATION_REPORT.txt
+
+NEW_FILE_METADATA:
+- linear_plot_projection.py
+  bytes: 14596
+  SHA-256: 7c6e3c88e99bc909244bc4f7f755485045d3bceae913570ea752efbc3067852a
+  encoding: UTF-8 without BOM
+  line endings: CRLF only
+  final newline: exactly one
+- tests/test_linear_plot_projection.py
+  bytes: 15294
+  SHA-256: f9f6b0352bf5e4217d7b401c5f8420c697140cff667a728471d2ba391f6af3bc
+  encoding: UTF-8 without BOM
+  line endings: CRLF only
+  final newline: exactly one
+- tests/test_linear_plot_lifecycle.py
+  bytes: 13628
+  SHA-256: 34004ce21dd690af207d567ea3b1797f198bd4682e09fca3fbdc9a8e3bebad6f
+  encoding: UTF-8 without BOM
+  line endings: CRLF only
+  final newline: exactly one
+
+3. AST validation
+
+Python executable: project .venv/Scripts/python.exe
+Flags/environment: python -B; PYTHONDONTWRITEBYTECODE=1
+
+AST_OK linear_plot_projection.py
+AST_OK tests/test_linear_plot_projection.py
+AST_OK tests/test_linear_plot_lifecycle.py
+
+AST_RESULT = PASS (3/3)
+
+The pre-existing first-party Python corpus was not reparsed because the Phase 1C1
+validation whitelist permits AST parsing only the three newly added Python files.
+
+4. Formal unittest command and result
+
+Python executable: project .venv/Scripts/python.exe
+Flags/environment: python -B; PYTHONDONTWRITEBYTECODE=1
+Modules, in command order:
+1. tests.test_linear_plot_projection
+2. tests.test_linear_plot_lifecycle
+3. tests.test_batch_state
+
+FORMAL_TESTS_RUN = 55
+FORMAL_TESTS_PASSED = 55
+FORMAL_TESTS_FAILED = 0
+FORMAL_TESTS_ERRORS = 0
+FORMAL_TESTS_SKIPPED = 0
+FORMAL_TEST_RESULT = PASS
+
+Formal unittest node IDs in actual execution order:
+1. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_revision_mismatch_rejects_only_standard_points
+2. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_sample_is_frozen_and_normalizes_finite_values
+3. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_source_list_and_dict_mutation_cannot_change_projection
+4. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_curve_formula_r_squared_range_and_status_come_from_active_set
+5. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_failed_and_empty_completed_images_do_not_create_points
+6. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_invalid_plot_modes_are_rejected
+7. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_missing_selected_order_does_not_fall_back_to_current_index
+8. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_modes_have_exact_fixed_curve_order
+9. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_none_nan_and_infinite_values_do_not_generate_points
+10. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_numbering_mode_and_stored_numbers_are_copied_not_reassigned
+11. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_only_included_calibration_samples_become_channel_points
+12. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_plottable_statuses_are_preserved_without_reclassification
+13. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_projection_and_nested_values_are_frozen_tuples
+14. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_rgb_points_use_exact_channel_coordinates_and_shared_identity
+15. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_same_filename_and_repeated_path_are_distinguished_by_image_order
+16. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_single_channel_mode_never_projects_other_channels
+17. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_unplottable_channel_does_not_suppress_other_channels
+18. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_builder_never_calls_formula_or_number_assignment_helpers
+19. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_calibration_and_detection_revision_gates_are_independent
+20. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_matching_batch_is_not_stale
+21. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_mismatched_batch_records_the_real_revision_conflict
+22. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_legacy_targets_and_display_pollution_are_never_read
+23. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_matching_revision_projects_every_completed_formal_sample
+24. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_missing_and_invalid_regression_statuses_are_copied_to_curves
+25. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_contains_no_io_clock_worker_gui_or_model_calls
+26. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_direct_imports_stay_within_pure_allowlist
+27. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_no_batch_has_no_detection_revision_and_is_not_stale
+28. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_construction_does_not_mutate_batch_or_samples
+29. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_is_detached_from_later_batch_mutation
+30. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_never_recalculates_old_detection_points
+31. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_suppresses_detection_points_and_marks_stale
+32. tests.test_batch_state.CompatibilityTests.test_legacy_single_image_target_fields_are_unchanged
+33. tests.test_batch_state.NaturalSortTests.test_batch_state_factory
+34. tests.test_batch_state.NaturalSortTests.test_case_extension_directories_and_duplicates_are_deterministic
+35. tests.test_batch_state.NaturalSortTests.test_current_image_index_contract
+36. tests.test_batch_state.NaturalSortTests.test_empty_and_single
+37. tests.test_batch_state.NaturalSortTests.test_empty_batch_index_and_current_image
+38. tests.test_batch_state.NaturalSortTests.test_invalid_constructor_index_and_list_mutation
+39. tests.test_batch_state.NaturalSortTests.test_natural_order_and_image_order
+40. tests.test_batch_state.NaturalSortTests.test_original_filename_is_not_modified
+41. tests.test_batch_state.NumberingTests.test_assign_image_numbers_is_spatial
+42. tests.test_batch_state.NumberingTests.test_failed_image_does_not_consume_batch_number
+43. tests.test_batch_state.NumberingTests.test_failed_stale_sample_is_cleared_without_batch_gap
+44. tests.test_batch_state.NumberingTests.test_per_image_resets_and_batch_continues
+45. tests.test_batch_state.NumberingTests.test_valid_error_valid_numbers_only_valid_samples
+46. tests.test_batch_state.PairingTests.test_all_input_permutations_have_identical_complete_result
+47. tests.test_batch_state.PairingTests.test_horizontal_overlap_fallback_can_pair_uniquely
+48. tests.test_batch_state.PairingTests.test_multiple_candidates_are_ambiguous_not_forced
+49. tests.test_batch_state.PairingTests.test_no_candidate_records_both_unmatched_targets
+50. tests.test_batch_state.PairingTests.test_unique_center_containment_pair
+51. tests.test_batch_state.RegressionSetTests.test_all_eight_statuses_have_fixed_semantics
+52. tests.test_batch_state.RegressionSetTests.test_mixed_confirmed_sources_are_rejected
+53. tests.test_batch_state.RegressionSetTests.test_three_distinct_equations_and_inclusive_boundaries
+54. tests.test_batch_state.SpatialSortTests.test_single_row_left_to_right
+55. tests.test_batch_state.SpatialSortTests.test_two_rows_top_then_bottom_and_shuffled_input
+
+5. Authoritative data flow
+
+Curve authority:
+active RegressionSet -> ordered R/G/B RegressionChannelModel snapshot ->
+CalibrationCurveView tuple.
+
+Only slope, intercept, r_squared, valid_min, valid_max, and unavailable_status
+from the active RegressionSet are copied into curve views. No formulas mapping,
+XLSX, GUI value, worker, model, or reconstructed regression is consulted.
+
+Calibration point authority:
+caller-provided successful regression samples -> immutable CalibrationSample
+snapshot -> included=True only -> per-channel CalibrationPoint tuples.
+
+Detection point authority:
+BatchState -> completed ImageItem values -> ImageItem.samples -> SampleResult ->
+per-mode DetectionPlotPoint tuple.
+
+Coordinates are fixed as R=(con_r, red), G=(con_g, green), and
+B=(con_b, blue). no_in_image and batch_no are copied without assignment or
+recalculation. selected_image_order alone controls is_current_image.
+
+The output holds only frozen dataclasses, primitive values, enum values, and
+nested tuples. It retains no BatchState, ImageItem, SampleResult, list, or dict
+reference.
+
+6. Revision gate results
+
+CALIBRATION_REVISION_MATCH:
+- included calibration points are projected into the selected curves.
+
+CALIBRATION_REVISION_MISMATCH:
+- active RegressionSet curves remain available;
+- calibration point tuples are empty;
+- calibration_points_stale=True.
+
+DETECTION_REVISION_MATCH:
+- completed images' formal SampleResult values are projected.
+
+DETECTION_REVISION_MISMATCH:
+- active RegressionSet curves remain available;
+- detection_points is empty;
+- detection_points_stale=True;
+- no old concentration is recalculated.
+
+NO_BATCH_STATE:
+- detection revision is None;
+- detection_points is empty;
+- detection_points_stale=False.
+
+7. Unavailable and non-finite point results
+
+Plottable and preserved without reclassification:
+- IN_RANGE
+- BELOW_RANGE
+- ABOVE_RANGE
+- RANGE_UNAVAILABLE
+
+Rejected independently per channel:
+- missing concentration or intensity
+- NaN or Infinity
+- INVALID_SLOPE
+- CALCULATION_FAILED
+- every other non-plottable status
+
+One invalid channel does not suppress valid sibling channels from the same
+SampleResult.
+
+8. Input immutability proof
+
+- A deepcopy comparison demonstrated BatchState and nested samples are unchanged
+  before and after projection construction.
+- Stored no_in_image and batch_no values remain byte-for-value unchanged.
+- Mutating source calibration lists/dicts after construction did not alter the
+  existing projection.
+- Mutating or clearing source ImageItem/SampleResult/BatchState objects after
+  construction did not alter the existing projection.
+- FrozenInstanceError tests passed for projection, curve, calibration point, and
+  calibration sample writes.
+- curves, calibration_points, and detection_points are tuples.
+
+9. Project integrity before and after
+
+Definition of first-party Python count:
+*.py excluding .venv, ultralytics, HT_Detector_GUI_v1_0,
+YOLO_Detection_Core, and __pycache__.
+
+PRE_IMPLEMENTATION:
+- non-.git files: 37539
+- first-party Python files: 40
+- pre-existing first-party AST status: not reparsed because only the three new
+  files were authorized for AST parsing
+- .pyc files: 9818
+- .pytest_cache directories: 0
+- PNG files: 1373
+- XLSX files: 56
+- transaction directories: 0
+- authorized new implementation files existed: 0/3
+- all-existing-file manifest SHA-256:
+  94f90c8c04c740316bf344000cc10d5901c913f3ffabe4a089c9c9bbdf7a7a9a
+
+POST_IMPLEMENTATION_BEFORE_HANDOFF_REPORT:
+- non-.git files: 37542
+- first-party Python files: 43
+- new-file AST status: PASS 3/3
+- .pyc files: 9818
+- .pytest_cache directories: 0
+- PNG files: 1373
+- XLSX files: 56
+- transaction directories: 0
+- authorized new implementation files existed: 3/3
+- pre-existing files compared: 37539
+- pre-existing-file manifest SHA-256:
+  94f90c8c04c740316bf344000cc10d5901c913f3ffabe4a089c9c9bbdf7a7a9a
+- pre-existing manifest matches pre-implementation: YES
+
+The only business implementation differences are the three authorized Python
+files. The handoff report is a fourth, separately authorized review artifact.
+
+10. Model file integrity
+
+- weights/cuvette_Peng/yolov8n_train/weights/best.pt
+  bytes: 6279129
+  SHA-256: 582a0f22c8fcc4ed5623d7e6e87069c8c6e38a7bc3199fc94590de90fb333e31
+- YOLO_Detection_Core/weights/cuvette_huili/yolov8n_train/weights/best.pt
+  bytes: 6281497
+  SHA-256: ebfb9c0ef8c6d758ecf063831df7fdb8fc81abc0622450cc49bed93698b51f2a
+
+Both size/hash pairs are identical before and after implementation.
+
+11. Prohibited execution/object counters
+
+GIT_COMMANDS_EXECUTED = 0
+NETWORK_OPERATIONS = 0
+QAPPLICATION_CREATED = 0
+QWIDGET_CREATED = 0
+QTHREAD_CREATED = 0
+DETECTMAIN_CREATED = 0
+OFFSCREEN_GUI_EXECUTED = 0
+VISIBLE_GUI_EXECUTED = 0
+WORKER_CREATED = 0
+MODEL_LOADS = 0
+MODEL_INFERENCES = 0
+CAMERA_ACCESSES = 0
+MAIN_PROGRAM_RUNS = 0
+QUAL7_RUNS = 0
+UNITTEST_DISCOVERY_RUNS = 0
+PYTEST_RUNS = 0
+
+12. Review report artifact metadata
+
+The exact final report file size and SHA-256 are recorded in the delivery
+response after this file is finalized. A byte stream cannot contain its own
+final cryptographic digest as ordinary text without making that digest
+self-referential. No other project report file was created.
+
+13. Completion boundary
+
+PHASE1C1_CORE_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C1_CORE_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+NEXT_REQUIRED_STEP = In a new Codex conversation, perform the Phase 1C1 Core independent read-only review.
+
+Phase 1C is not complete. Phase 1C2 is not authorized until that independent
+review passes.

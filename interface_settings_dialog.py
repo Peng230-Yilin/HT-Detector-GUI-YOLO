@@ -35,6 +35,7 @@ class InterfaceSettingsDialog(QDialog):
         self.setModal(True)
         self.resize(700, 650)
         self._defaults = default_settings()
+        self._saved_settings = None
         current, warnings, _ = load_effective_settings(apply_to_module=False)
 
         self.detect_confidence = self._double_spin(0.001, 1.0, 0.01, 3)
@@ -63,13 +64,16 @@ class InterfaceSettingsDialog(QDialog):
 
         self.color_channel = QComboBox(self)
         self.color_channel.addItems(("R", "G", "B"))
+        self.linear_plot_channel = QComboBox(self)
+        self.linear_plot_channel.addItems(("R", "G", "B", "RGB"))
         self.rgb_calculate_accuracy = self._integer_spin(0, 16)
         self.rgb_display_accuracy = self._integer_spin(0, 6)
         self.con_display_accuracy = self._integer_spin(0, 6)
         concentration_group = self._group(
             "Concentration",
             (
-                ("Color channel", self.color_channel),
+                ("Detection color channel", self.color_channel),
+                ("Linear plot channel", self.linear_plot_channel),
                 ("RGB calculation precision", self.rgb_calculate_accuracy),
                 ("RGB display decimals", self.rgb_display_accuracy),
                 ("Concentration display decimals", self.con_display_accuracy),
@@ -176,6 +180,7 @@ class InterfaceSettingsDialog(QDialog):
         self.x1_ratio.setValue(settings["x1_ratio"])
         self.y1_ratio.setValue(settings["y1_ratio"])
         self.color_channel.setCurrentText(settings["color_channel"])
+        self.linear_plot_channel.setCurrentText(settings["linear_plot_channel"])
         self.rgb_calculate_accuracy.setValue(settings["rgb_calculate_accuracy"])
         self.rgb_display_accuracy.setValue(settings["rgb_display_accuracy"])
         self.con_display_accuracy.setValue(settings["con_display_accuracy"])
@@ -265,6 +270,7 @@ class InterfaceSettingsDialog(QDialog):
             "x1_ratio": self.x1_ratio.value(),
             "y1_ratio": self.y1_ratio.value(),
             "color_channel": self.color_channel.currentText(),
+            "linear_plot_channel": self.linear_plot_channel.currentText(),
             "rgb_calculate_accuracy": self.rgb_calculate_accuracy.value(),
             "rgb_display_accuracy": self.rgb_display_accuracy.value(),
             "con_display_accuracy": self.con_display_accuracy.value(),
@@ -277,6 +283,10 @@ class InterfaceSettingsDialog(QDialog):
     def _restore_defaults(self):
         self._set_values(self._defaults)
 
+    @property
+    def saved_settings(self):
+        return None if self._saved_settings is None else dict(self._saved_settings)
+
     def accept(self):
         try:
             settings = validate_settings(self._settings())
@@ -284,6 +294,7 @@ class InterfaceSettingsDialog(QDialog):
         except (RuntimeError, ValueError) as error:
             QMessageBox.critical(self, "Interface Settings", str(error))
             return
+        self._saved_settings = dict(settings)
         QMessageBox.information(
             self,
             "Interface Settings",

@@ -1,0 +1,531 @@
+Phase 1C2 Repair 3 - Compact Linear Plot annotations and RGB legend
+Implementation Report
+
+PHASE1C2_REPAIR3_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C2_REPAIR3_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+1. Preconditions and new manual-validation baseline
+
+PHASE1C2_REPAIR2_IMPLEMENTATION_REPORT.txt was read completely before implementation.
+- expected bytes=27797
+- actual bytes=27797
+- expected SHA-256=ad2a8c6a09c878e8c3179674c6a82c5282f1d040d145fc95cabc9b5578792d4a
+- actual SHA-256=ad2a8c6a09c878e8c3179674c6a82c5282f1d040d145fc95cabc9b5578792d4a
+- identity match=YES
+- extracted Repair 2 node count=141
+- extracted unique node count=141
+
+The new baseline was taken after the failed visual manual validation. Existing
+manual-validation artifacts were treated as protected input and were not
+deleted, overwritten, moved, or classified as Repair 3 pollution.
+
+BASELINE_NON_GIT_FILE_COUNT = 37553
+BASELINE_DIRECTORY_COUNT = 3483
+BASELINE_FIRST_PARTY_PYTHON_COUNT = 48
+BASELINE_PYC_COUNT = 9820
+BASELINE_PNG_COUNT = 1373
+BASELINE_XLSX_COUNT = 56
+BASELINE_PYTEST_CACHE_COUNT = 0
+BASELINE_TRANSACTION_DIRECTORY_COUNT = 0
+BASELINE_TEMPORARY_OUTPUT_COUNT = 0
+BASELINE_RESIDUAL_PROCESS_COUNT = 0
+BASELINE_FULL_MANIFEST_SHA256 = 3891e180c6780644eb2ca087e09fbf10f5b8b35671549cffd72fea48c730dc955
+
+The baseline contained two more pyc files than the Repair 2 delivery baseline.
+They predated Repair 3 and were preserved. The existing runs directory was also
+preserved exactly from this new baseline:
+- recursive files=25
+- total bytes=34478204
+- content SHA-256=4e845a3a55588f1b0862c93678613d1e8f1d64ca7d7b56e2cb607bf8e92e0c7eb
+
+2. Confirmed visual specification and production implementation
+
+RGB mode:
+- title: Linear Regression – RGB
+- Y axis: Intensity
+- legend without detection: R, G, B
+- legend with detection: R, G, B, Detected (n=N)
+- no equation, slope, intercept, fit prefix, Standards text, or R² appears
+  in the RGB legend
+- the consolidated Detected entry occurs at most once
+- axes.legend is used; no figure-level legend is created
+- loc="upper center", bbox_to_anchor=(0.5, 1.13)
+- one row with ncol=3 or ncol=4
+- frameon=False, fontsize=9
+- handlelength=1.2, columnspacing=0.8, handletextpad=0.4,
+  borderaxespad=0.0
+
+The existing shared figure margin in DetectMain remains:
+  left=0.14, right=0.96, bottom=0.16, top=0.88
+This already reserves a compact band above the axes. The legend anchor occupies
+that band while the title remains below it. No detectmain.py change was needed,
+and the plotting area was not reduced further.
+
+Single-channel mode:
+- titles: Linear Regression – R / G / B
+- Y axes: R Intensity / G Intensity / B Intensity
+- legend: Standards (n=N)
+- legend: y = <compact equation>; R² = <three-decimal value>
+- legend: Detected (n=N), only when detection points exist
+- loc="best", fontsize=9, frameon=True, framealpha=0.85
+- compact handle and border spacing
+
+Confirmed text example:
+  y = -13.32x + 197.7; R² = 0.954
+
+Numeric display rules:
+- slope: 4 significant digits
+- intercept: 4 significant digits
+- R²: exactly 3 decimal places
+- intercept sign is selected separately, so "+ -value" cannot be produced
+- positive and negative zero display as 0
+- compact scientific notation removes redundant exponent zeroes
+
+All modes use:
+- title fontsize=13
+- axis-label fontsize=10
+- tick-label fontsize=9
+- legend/equation fontsize=9
+
+3. Data and business invariants
+
+Only presentation labels, title/axis text, legend layout, and font arguments
+changed. Curve arithmetic still uses the exact projection slope and intercept.
+Calibration and detection coordinates, colors, markers, projection objects,
+statuses, revision gates, selected image order, time authorities, GUI tables,
+callbacks, numbering, concentration, and state were not changed.
+
+linear_plot_renderer.py still imports only linear_plot_projection. It does not
+import Qt, Matplotlib backends, openpyxl, pandas, cv2, numpy, time, subprocess,
+DetectMain, settings, workers, models, or Camera. It does not draw a canvas,
+save a file, write configuration, or mutate the projection.
+
+EXCEL_NUMERIC_PRECISION_CHANGED = NO
+XLSX_SCHEMA_CHANGE_FOUND = NO
+PROJECTION_COORDINATE_CHANGE_FOUND = NO
+DETECTION_COORDINATE_CHANGE_FOUND = NO
+REGRESSION_NUMERIC_AUTHORITY_CHANGE_FOUND = NO
+REVISION_GATE_CHANGE_FOUND = NO
+SELECTED_IMAGE_ORDER_CHANGE_FOUND = NO
+TIME_AUTHORITY_CHANGE_FOUND = NO
+GUI_TABLE_CHANGE_FOUND = NO
+DETECTION_IMAGE_CHANGE_FOUND = NO
+SAVE_TRANSACTION_CHANGE_FOUND = NO
+INTERFACE_SETTINGS_CHANGE_FOUND = NO
+RGB_STARTUP_RESTORE_CHANGE_FOUND = NO
+
+4. Screen and saved PNG path
+
+The screen path remains:
+  DetectMain._plot_regression_result
+  -> render_linear_plot(self.ax, projection)
+  -> self.canvas.draw()
+
+The Save Linear PNG path remains:
+  DetectMain._build_linear_export_bytes
+  -> self._plot_regression_result()
+  -> self.canvas.print_png(curve_buffer)
+
+There is one renderer implementation. Save Linear does not contain a copied
+legend/equation formatter, does not read GUI legend text, Excel, or legacy
+targets, and does not rerun regression or detection.
+
+SCREEN_AND_SAVE_SHARE_RENDERER = YES
+SECOND_RENDERER_FOUND = NO
+DETECTMAIN_MODIFIED = NO
+
+5. Exact authorized files and identities
+
+MODIFIED:
+
+- linear_plot_renderer.py
+  before bytes=4696
+  before UTC mtime=2026-09-26T14:57:12.8133469Z
+  before SHA-256=14cf288b827a7413b9c8f6c8d8517343249c547fd2d1bcd47d06031133e45969
+  after bytes=6315
+  after UTC mtime=2026-09-27T05:41:16.9473106Z
+  after SHA-256=ac5ebc58055bf849492629c42f6a82709cbf26812fd72a522fc1cb476ecbfe87
+
+- tests/test_phase1c2_linear_plot_renderer.py
+  before bytes=10729
+  before UTC mtime=2026-09-26T14:57:12.8196444Z
+  before SHA-256=17191655cdc7a69f6fed99bb19f5a0081f0b36e0c4ac19941bea31b53fde48ea
+  after bytes=11011
+  after UTC mtime=2026-09-27T05:41:16.9504443Z
+  after SHA-256=52e78bc17bef675c69b71a1629ac6d48d7db27dd05ff30b8f08067ec3a746451
+
+- tests/test_phase1c2_repair1_plot_setting_location.py
+  before bytes=22502
+  before UTC mtime=2026-09-26T15:43:10.6957019Z
+  before SHA-256=d6c6839679c59334c3400d0bdcec9491cedc2c9bba19fbda6cdeef4ed29ec5ca
+  after bytes=22671
+  after UTC mtime=2026-09-27T05:41:27.0374838Z
+  after SHA-256=c48b9a0a3939cf50357c328e5197fd19066e2feed17818ececfecaaa7f51a3f9
+
+ADDED:
+
+- tests/test_phase1c2_repair3_compact_plot_annotations.py
+  before absent
+  after bytes=9143
+  after UTC mtime=2026-09-27T05:39:55.0353164Z
+  after SHA-256=235e0d9d04973c4d0c311e13af6fb11ef345f19893338ecc141982e80e699363
+
+- PHASE1C2_REPAIR3_IMPLEMENTATION_REPORT.txt
+  before absent
+  final identity is supplied in the delivery response because embedding this
+  report's own final hash would be self-referential.
+
+Allowed-but-unchanged:
+- tests/test_phase1c2_plot_integration.py
+  bytes=25435
+  SHA-256=5c0cc274e9411bbe5c50f2bd59e251c8acf26e5b0870e1774feb0546cda1252e
+- detectmain.py
+  bytes=161031
+  SHA-256=1451074ad110c789b508b55c0537cf4bcd7edf57bfa43e6e55b004c6227426b8
+
+No other project path was authorized or changed.
+
+6. File formats
+
+- linear_plot_renderer.py: UTF-8 without BOM; CRLF only; CRLF=203;
+  one final CRLF.
+- tests/test_phase1c2_linear_plot_renderer.py: UTF-8 without BOM; CRLF only;
+  CRLF=286; one final CRLF.
+- tests/test_phase1c2_repair1_plot_setting_location.py: UTF-8 without BOM;
+  LF only; bare LF=582; one final LF.
+- tests/test_phase1c2_repair3_compact_plot_annotations.py:
+  UTF-8 without BOM; LF only; bare LF=251; one final LF.
+- this report: UTF-8 without BOM; LF only; one final LF.
+
+7. Test updates, red evidence, and legal replacement
+
+The existing renderer tests were updated only where the confirmed visual
+contract changed:
+- compact R/G/B/RGB titles and axes
+- consolidated Detected (n=N) wording
+- compact single-channel equation text
+- renderer fake support for font and legend keyword recording
+
+The existing coordinate, curve order, color, marker, failure isolation,
+RANGE_UNAVAILABLE, projection immutability, import boundary, and no-save/no-draw
+assertions remain.
+
+Legal one-for-one replacement:
+OLD:
+tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_25_projection_and_renderer_hashes_are_unchanged
+NEW:
+tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_25_projection_hash_is_unchanged_and_renderer_change_is_repair3_only
+Reason:
+The projection remains protected by its original hash while the renderer is
+intentionally changed by Repair 3 and is pinned to its new exact hash.
+
+The existing node
+tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_fit_legend_contains_projection_equation_and_r_squared
+now explicitly exercises G single-channel mode. RGB behavior is covered by the
+new no-formula node.
+
+The existing node
+tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_legend_entry_is_not_repeated_per_point
+continues to require one entry and now requires Detected (n=N).
+
+Valid pre-production Repair 3 run:
+- exact new node count=10
+- tests run=10
+- passes=2
+- failures=6
+- errors=2
+- result=RED, as expected against the old renderer
+
+Post-production directed runs:
+- 10/10 new nodes passed
+- 17/17 renderer plus replacement nodes passed
+- 27/27 renderer, replacement, and new nodes passed
+- after line-ending normalization, the same 27/27 passed
+
+A preceding malformed PowerShell array expression produced one unittest loader
+error for a non-existent concatenated ID before the valid red run. It executed
+no test body, modified no file, was not a formal node failure, and did not
+affect the one-attempt final authoritative run.
+
+REPAIR3_DIRECTED_NODE_ASSEMBLY_DEVIATION = RECORDED
+
+8. Final authoritative test result
+
+Runner: project .venv/Scripts/python.exe
+Environment: PYTHONDONTWRITEBYTECODE=1
+Flags: python -B
+Framework: unittest exact node IDs; no discovery; no pytest
+
+REPAIR2_REPORT_NODE_COUNT = 141
+LEGAL_REPLACEMENT_COUNT = 1
+REPAIR3_NEW_NODE_COUNT = 10
+FINAL_NODE_COUNT = 151
+FINAL_UNIQUE_NODE_COUNT = 151
+DUPLICATE_NODE_COUNT = 0
+MISSING_NODE_COUNT = 0
+FINAL_TEST_PASS_COUNT = 151
+FINAL_TEST_FAIL_COUNT = 0
+FINAL_TEST_ERROR_COUNT = 0
+FINAL_TEST_SKIP_COUNT = 0
+FINAL_AUTHORITATIVE_ATTEMPT_COUNT = 1
+FINAL_AUTHORITATIVE_TEST_RESULT = PASS
+FINAL_AUTHORITATIVE_DURATION_SECONDS = 1.363
+
+Final exact node IDs in execution order:
+1. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_revision_mismatch_rejects_only_standard_points
+2. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_sample_is_frozen_and_normalizes_finite_values
+3. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_source_list_and_dict_mutation_cannot_change_projection
+4. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_curve_formula_r_squared_range_and_status_come_from_active_set
+5. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_failed_and_empty_completed_images_do_not_create_points
+6. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_invalid_plot_modes_are_rejected
+7. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_missing_selected_order_does_not_fall_back_to_current_index
+8. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_modes_have_exact_fixed_curve_order
+9. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_none_nan_and_infinite_values_do_not_generate_points
+10. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_numbering_mode_and_stored_numbers_are_copied_not_reassigned
+11. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_only_included_calibration_samples_become_channel_points
+12. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_plottable_statuses_are_preserved_without_reclassification
+13. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_projection_and_nested_values_are_frozen_tuples
+14. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_rgb_points_use_exact_channel_coordinates_and_shared_identity
+15. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_same_filename_and_repeated_path_are_distinguished_by_image_order
+16. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_single_channel_mode_never_projects_other_channels
+17. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_unplottable_channel_does_not_suppress_other_channels
+18. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_builder_never_calls_formula_or_number_assignment_helpers
+19. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_calibration_and_detection_revision_gates_are_independent
+20. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_matching_batch_is_not_stale
+21. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_mismatched_batch_records_the_real_revision_conflict
+22. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_legacy_targets_and_display_pollution_are_never_read
+23. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_matching_revision_projects_every_completed_formal_sample
+24. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_missing_and_invalid_regression_statuses_are_copied_to_curves
+25. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_contains_no_io_clock_worker_gui_or_model_calls
+26. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_direct_imports_stay_within_pure_allowlist
+27. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_no_batch_has_no_detection_revision_and_is_not_stale
+28. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_construction_does_not_mutate_batch_or_samples
+29. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_is_detached_from_later_batch_mutation
+30. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_never_recalculates_old_detection_points
+31. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_suppresses_detection_points_and_marks_stale
+32. tests.test_batch_state.CompatibilityTests.test_legacy_single_image_target_fields_are_unchanged
+33. tests.test_batch_state.NaturalSortTests.test_batch_state_factory
+34. tests.test_batch_state.NaturalSortTests.test_case_extension_directories_and_duplicates_are_deterministic
+35. tests.test_batch_state.NaturalSortTests.test_current_image_index_contract
+36. tests.test_batch_state.NaturalSortTests.test_empty_and_single
+37. tests.test_batch_state.NaturalSortTests.test_empty_batch_index_and_current_image
+38. tests.test_batch_state.NaturalSortTests.test_invalid_constructor_index_and_list_mutation
+39. tests.test_batch_state.NaturalSortTests.test_natural_order_and_image_order
+40. tests.test_batch_state.NaturalSortTests.test_original_filename_is_not_modified
+41. tests.test_batch_state.NumberingTests.test_assign_image_numbers_is_spatial
+42. tests.test_batch_state.NumberingTests.test_failed_image_does_not_consume_batch_number
+43. tests.test_batch_state.NumberingTests.test_failed_stale_sample_is_cleared_without_batch_gap
+44. tests.test_batch_state.NumberingTests.test_per_image_resets_and_batch_continues
+45. tests.test_batch_state.NumberingTests.test_valid_error_valid_numbers_only_valid_samples
+46. tests.test_batch_state.PairingTests.test_all_input_permutations_have_identical_complete_result
+47. tests.test_batch_state.PairingTests.test_horizontal_overlap_fallback_can_pair_uniquely
+48. tests.test_batch_state.PairingTests.test_multiple_candidates_are_ambiguous_not_forced
+49. tests.test_batch_state.PairingTests.test_no_candidate_records_both_unmatched_targets
+50. tests.test_batch_state.PairingTests.test_unique_center_containment_pair
+51. tests.test_batch_state.RegressionSetTests.test_all_eight_statuses_have_fixed_semantics
+52. tests.test_batch_state.RegressionSetTests.test_mixed_confirmed_sources_are_rejected
+53. tests.test_batch_state.RegressionSetTests.test_three_distinct_equations_and_inclusive_boundaries
+54. tests.test_batch_state.SpatialSortTests.test_single_row_left_to_right
+55. tests.test_batch_state.SpatialSortTests.test_two_rows_top_then_bottom_and_shuffled_input
+56. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_single_channel_modes_draw_only_the_selected_channel
+57. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_rgb_uses_fixed_red_green_blue_order
+58. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_three_distinct_formulas_do_not_cross_channels
+59. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_calibration_point_coordinates_are_exact
+60. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_point_coordinates_are_exact
+61. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_calibration_and_detection_markers_are_distinct
+62. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_rgb_uses_fixed_channel_colors_for_every_artist
+63. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_legend_entry_is_not_repeated_per_point
+64. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_fit_legend_contains_projection_equation_and_r_squared
+65. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_unavailable_channel_does_not_stop_other_channels
+66. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_no_detection_points_still_draws_the_curve
+67. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_stale_projection_never_renders_old_detection_points
+68. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_range_unavailable_detection_point_remains_renderable
+69. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_does_not_modify_projection
+70. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_imports_only_projection_and_standard_library
+71. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_never_draws_canvas_or_saves_files
+72. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_linear_plot_channel_has_one_runtime_authority_field
+73. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_only_exact_r_g_b_rgb_modes_are_accepted
+74. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_channel_menu_is_removed_from_detectionwindow
+75. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_settings_places_plot_channel_below_detection_channel
+76. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_setting_selectors_have_distinct_fixed_choices
+77. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_dialog_collects_distinct_channel_keys
+78. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_setter_redraws_only_with_active_regression
+79. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_mode_never_writes_detection_color_channel_setting
+80. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_color_channel_cannot_write_linear_plot_mode
+81. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_initial_mode_reads_linear_plot_setting_with_b_fallback
+82. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_reads_active_regression_set_directly
+83. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_never_reads_regression_result_formulas
+84. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_calibration_revision_gate_rejects_missing_and_stale_samples
+85. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_projection_builder_receives_only_authoritative_inputs
+86. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_detection_points_source_is_controller_batch_state
+87. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_selected_image_order_comes_only_from_formal_selection_key
+88. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_setting_redraw_paths_do_not_read_clocks
+89. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_setting_redraw_paths_emit_no_worker_signal
+90. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_does_not_load_models
+91. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_does_not_call_formula_file_loader
+92. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_save_linear_reuses_current_plot_renderer_before_print_png
+93. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_save_transactions_xlsx_callbacks_and_time_functions_are_unchanged
+94. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_linear_and_detection_xlsx_schema_functions_are_unchanged
+95. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_both_gui_result_tables_keep_five_columns
+96. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_shared_time_display_structure_is_unchanged
+97. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_reads_demo_xlsx
+98. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_builds_demo_regression_set
+99. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_calculates_demo_concentrations
+100. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_ui_and_generated_ui_files_are_unchanged
+101. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_phase1c1_core_files_are_unchanged
+102. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_new_tests_do_not_import_or_create_qt_gui_objects
+103. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_01_detectionwindow_has_no_plot_channel_submenu
+104. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_02_plot_action_group_is_removed
+105. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_03_plot_actions_are_removed
+106. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_04_linear_numbering_menu_is_retained
+107. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_05_detection_color_channel_label_exists
+108. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_06_detection_selector_is_exact_r_g_b
+109. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_07_plot_channel_row_immediately_follows_detection_channel
+110. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_08_plot_selector_is_exact_r_g_b_rgb
+111. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_09_selectors_use_distinct_configuration_keys
+112. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_10_legacy_config_migrates_from_valid_detection_channel
+113. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_11_legacy_migration_has_no_write_path
+114. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_12_invalid_plot_channel_falls_back_to_b
+115. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_13_detection_color_channel_still_rejects_rgb
+116. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_14_restore_defaults_resets_both_channels
+117. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_15_cancel_changes_no_runtime_channel_and_does_not_redraw
+118. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_16_ok_collects_two_independent_channel_values
+119. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_17_ok_passes_only_plot_setting_to_runtime_plot_setter
+120. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_18_detection_channel_retains_formal_worker_path
+121. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_19_plot_setter_does_not_write_detection_setting
+122. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_20_plot_setter_has_no_configuration_write
+123. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_21_active_regression_causes_exactly_one_redraw
+124. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_22_missing_active_regression_causes_no_redraw
+125. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_23_plot_setting_update_does_not_read_clock
+126. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_24_plot_setting_update_runs_no_worker_model_or_detection
+127. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_25_projection_hash_is_unchanged_and_renderer_change_is_repair3_only
+128. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_26_save_linear_current_view_path_is_unchanged
+129. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_27_both_result_tables_still_have_five_columns
+130. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_28_ui_and_generated_ui_files_are_unchanged
+131. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_29_new_test_creates_no_qt_or_gui_object
+132. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_30_project_has_only_one_plot_channel_control
+133. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_31_new_install_plot_channel_default_is_b
+134. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_01_all_four_valid_modes_survive_startup
+135. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_02_saved_rgb_survives_config_snapshot_and_startup
+136. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_03_missing_mode_falls_back_to_b
+137. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_04_invalid_modes_fall_back_to_b
+138. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_05_legacy_inherited_r_g_b_modes_survive_startup
+139. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_06_startup_selection_does_not_mutate_settings_or_write_files
+140. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_07_startup_selection_runs_no_redraw_clock_worker_model_or_camera
+141. tests.test_phase1c2_repair2_startup_rgb_restore.Repair2StartupRgbRestoreTests.test_08_rgb_plot_mode_remains_independent_from_detection_color_channel
+142. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_01_rgb_title_and_y_axis_are_compact
+143. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_02_rgb_without_detection_has_only_r_g_b_legend_entries
+144. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_03_rgb_detection_adds_exactly_one_compact_detected_entry
+145. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_04_rgb_legend_contains_no_formula_or_r_squared_text
+146. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_05_rgb_legend_is_above_axes_compact_and_unframed
+147. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_06_single_channel_retains_compact_complete_equation
+148. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_07_single_channel_numeric_display_uses_confirmed_precision
+149. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_08_confirmed_font_sizes_are_applied_to_all_plot_text
+150. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_09_formatting_changes_no_projection_or_excel_authority
+151. tests.test_phase1c2_repair3_compact_plot_annotations.Repair3CompactPlotAnnotationTests.test_10_screen_and_save_paths_reuse_the_same_renderer
+
+9. AST and protected identities
+
+FINAL_AST_OK linear_plot_renderer.py
+FINAL_AST_OK tests/test_phase1c2_linear_plot_renderer.py
+FINAL_AST_OK tests/test_phase1c2_repair1_plot_setting_location.py
+FINAL_AST_OK tests/test_phase1c2_repair3_compact_plot_annotations.py
+FINAL_AST_ERROR_COUNT = 0
+REPAIR3_FORBIDDEN_IMPORT_COUNT = 0
+REPAIR3_FORBIDDEN_CONSTRUCTOR_CALL_COUNT = 0
+FORMAL_TEST_FORBIDDEN_CONSTRUCTOR_CALL_COUNT = 0
+
+Protected production identities:
+- linear_plot_projection.py
+  bytes=14596
+  SHA-256=7c6e3c88e99bc909244bc4f7f755485045d3bceae913570ea752efbc3067852a
+- detectmain.py
+  bytes=161031
+  SHA-256=1451074ad110c789b508b55c0537cf4bcd7edf57bfa43e6e55b004c6227426b8
+- detectionwindow.py
+  bytes=35752
+  SHA-256=63256975f23a75776ebc1682b6bf3f5afd466a649ee887b93486d77a5f7da25a
+- interface_config.py
+  bytes=14132
+  SHA-256=f14de7c23a8be0040387afb3c1abb26317634b70f2bc14edf3ea4010780646d9
+- interface_settings_dialog.py
+  bytes=11970
+  SHA-256=3a332a0f4cf1f2a70f57f4ce3e98eab093c93f7454e12d3968db37debad7514a
+
+UI/generated UI identities:
+- ui/detectmain.ui: cb533b3586f3c8c3e578a4340bffe11bec94091e2e59542d24e6757679648cf4
+- ui/ui_detectmain.py: e342f9c59348e64ce6676ffd52c78e85745be5c0d90b95fa08b7d34ca62ecc29
+- ui/detectwindow.ui: 58d77e803990e191cc3831a7533a80b0dba7c0249258638a4d7524df2f7a4b42
+- ui/ui_detectwindow.py: 8550c0a4710d1919e6e0dcecfd9d67515593438973efb91eedf623ce01159f08
+
+Model identities:
+- weights/cuvette_Peng/yolov8n_train/weights/best.pt
+  bytes=6279129
+  SHA-256=582a0f22c8fcc4ed5623d7e6e87069c8c6e38a7bc3199fc94590de90fb333e31
+- YOLO_Detection_Core/weights/cuvette_huili/yolov8n_train/weights/best.pt
+  bytes=6281497
+  SHA-256=ebfb9c0ef8c6d758ecf063831df7fdb8fc81abc0622450cc49bed93698b51f2a
+
+10. Integrity summary before this report
+
+POST_CODE_AND_TESTS_BEFORE_REPORT_NON_GIT_FILE_COUNT = 37554
+POST_CODE_AND_TESTS_BEFORE_REPORT_FULL_MANIFEST_SHA256 = f1921204137521d28e1ff7915a90fbf212232e6ae1eeb669d03c220c8db6ad5e6
+POST_CODE_AND_TESTS_BEFORE_REPORT_CHANGE_COUNT = 4
+POST_CODE_AND_TESTS_BEFORE_REPORT_PYC_COUNT = 9820
+POST_CODE_AND_TESTS_BEFORE_REPORT_PNG_COUNT = 1373
+POST_CODE_AND_TESTS_BEFORE_REPORT_XLSX_COUNT = 56
+
+Paths different from the new manual-validation baseline:
+- CHANGED linear_plot_renderer.py
+- CHANGED tests/test_phase1c2_linear_plot_renderer.py
+- CHANGED tests/test_phase1c2_repair1_plot_setting_location.py
+- ADDED tests/test_phase1c2_repair3_compact_plot_annotations.py
+
+This report is the fifth authorized changed path. Its final identity and the
+complete post-report manifest comparison are supplied in the delivery response.
+
+11. Prohibited execution and object counters
+
+GIT_COMMANDS_EXECUTED = 0
+NETWORK_OPERATIONS = 0
+QAPPLICATION_CREATED = 0
+QWIDGET_CREATED = 0
+QDIALOG_CREATED = 0
+QTHREAD_CREATED = 0
+DETECTMAIN_CREATED = 0
+DETECTWINDOW_CREATED = 0
+INTERFACE_SETTINGS_DIALOG_CREATED = 0
+YOLO_WORKER_CREATED = 0
+FIGURE_CANVAS_CREATED = 0
+OFFSCREEN_GUI_EXECUTED = 0
+VISIBLE_GUI_EXECUTED = 0
+MAIN_PROGRAM_RUNS = 0
+MODEL_LOADS = 0
+MODEL_INFERENCES = 0
+CAMERA_ACCESSES = 0
+UNITTEST_DISCOVERY_RUNS = 0
+PYTEST_RUNS = 0
+QUAL7_RUNS = 0
+MANUAL_VALIDATION_RUNS = 0
+
+12. Historical procedural-deviation record
+
+IMPLEMENTATION_READ_ONLY_GIT_DEVIATION = RECORDED
+REPAIR1_READ_ONLY_GIT_DEVIATION = RECORDED
+OFFSCREEN_GUI_PROCEDURAL_DEVIATION = RECORDED
+REPAIR2_QAPPLICATION_PROCEDURAL_DEVIATION = RECORDED
+REPAIR3_DIRECTED_NODE_ASSEMBLY_DEVIATION = RECORDED
+
+No prohibited Git, network, GUI, model, inference, or Camera operation occurred
+during Repair 3.
+
+13. Completion boundary
+
+PHASE1C2_REPAIR3_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C2_REPAIR3_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+NEXT_REQUIRED_STEP = In a new Codex conversation, perform the Phase 1C2 Repair 3 independent read-only review.
+
+The software was not started. Manual validation remains blocked.

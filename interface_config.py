@@ -20,6 +20,7 @@ ALLOWED_SETTINGS = (
     "x1_ratio",
     "y1_ratio",
     "color_channel",
+    "linear_plot_channel",
     "rgb_calculate_accuracy",
     "rgb_display_accuracy",
     "con_display_accuracy",
@@ -101,8 +102,11 @@ def default_settings(interface_module=None):
     if _DEFAULT_SETTINGS is None:
         module = interface_module or load_interface_module()
         raw_defaults = {
-            name: copy.deepcopy(getattr(module, name)) for name in ALLOWED_SETTINGS
+            name: copy.deepcopy(getattr(module, name))
+            for name in ALLOWED_SETTINGS
+            if name != "linear_plot_channel"
         }
+        raw_defaults["linear_plot_channel"] = "B"
         _DEFAULT_SETTINGS = validate_settings(raw_defaults)
     return copy.deepcopy(_DEFAULT_SETTINGS)
 
@@ -151,6 +155,8 @@ def validate_settings(settings):
         raise ValueError("y1_ratio - y0_ratio must be at least 0.0001.")
     if settings["color_channel"] not in ("R", "G", "B"):
         raise ValueError("color_channel must be R, G, or B.")
+    if settings["linear_plot_channel"] not in ("R", "G", "B", "RGB"):
+        raise ValueError("linear_plot_channel must be R, G, B, or RGB.")
     _require_integer(settings, "rgb_calculate_accuracy", 0, 16)
     _require_integer(settings, "rgb_display_accuracy", 0, 6)
     _require_integer(settings, "con_display_accuracy", 0, 6)
@@ -206,8 +212,28 @@ def validate_settings(settings):
 def apply_settings(interface_module, settings):
     validated = validate_settings(settings)
     for name in ALLOWED_SETTINGS:
+        if name == "linear_plot_channel":
+            continue
         setattr(interface_module, name, copy.deepcopy(validated[name]))
     return validated
+
+
+def merge_settings_overrides(defaults, overrides):
+    if not isinstance(overrides, dict):
+        raise ValueError("overrides must be an object.")
+    unknown = set(overrides) - set(ALLOWED_SETTINGS)
+    if unknown:
+        raise ValueError(
+            "Unknown override setting(s): {}.".format(", ".join(sorted(unknown)))
+        )
+
+    merged = copy.deepcopy(defaults)
+    merged.update(overrides)
+    if "linear_plot_channel" not in overrides:
+        merged["linear_plot_channel"] = merged["color_channel"]
+    elif overrides["linear_plot_channel"] not in ("R", "G", "B", "RGB"):
+        merged["linear_plot_channel"] = "B"
+    return validate_settings(merged)
 
 
 def load_effective_settings(config_file=None, apply_to_module=True):
@@ -228,16 +254,7 @@ def load_effective_settings(config_file=None, apply_to_module=True):
         if document.get("version") != CONFIG_VERSION:
             raise ValueError("Unsupported configuration version.")
         overrides = document.get("overrides")
-        if not isinstance(overrides, dict):
-            raise ValueError("overrides must be an object.")
-        unknown = set(overrides) - set(ALLOWED_SETTINGS)
-        if unknown:
-            raise ValueError(
-                "Unknown override setting(s): {}.".format(", ".join(sorted(unknown)))
-            )
-        merged = copy.deepcopy(defaults)
-        merged.update(overrides)
-        validated = validate_settings(merged)
+        validated = merge_settings_overrides(defaults, overrides)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
         warning = "Invalid interface settings; using interface.py defaults: {}".format(
             error

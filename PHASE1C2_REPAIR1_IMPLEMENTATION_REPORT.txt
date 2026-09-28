@@ -1,0 +1,476 @@
+Phase 1C2 Repair 1 - Move Linear Plot Channel into Interface Settings
+Implementation Report
+
+PHASE1C2_REPAIR1_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C2_REPAIR1_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+1. Repair reason and result
+
+The Phase 1C2 manual validation failed because Edit -> Linear -> Plot Channel
+duplicated the existing Interface Settings color-channel concept and placed the
+new control in the wrong location.
+
+The Plot Channel submenu, its R/G/B/RGB QActions, its QActionGroup, its signal,
+and its checked-state mirror have been completely removed. The existing Edit ->
+Linear menu and its Single Image / Image Series numbering-mode actions remain.
+Detection Scope, Detection Numbering, Interface, Enable Camera, and all other
+existing menus and shortcuts remain in place.
+
+The final Interface Settings -> Detection -> Concentration order is:
+
+- Detection color channel: R / G / B
+- Linear plot channel: R / G / B / RGB
+- RGB calculation precision
+- RGB display decimals
+- Concentration display decimals
+
+No new tab, group box, menu, toolbar action, dialog, .ui file, or generated UI
+file was added or modified. Both selectors use the existing QFormLayout row
+geometry, so they share the existing spacing, width, and height rules.
+
+2. Configuration authority and migration
+
+interface_config.py now recognizes the independent key linear_plot_channel.
+Its valid values are exactly R, G, B, and RGB. Its new-install and Restore
+Defaults value is B.
+
+color_channel remains independent and continues to accept only R, G, and B.
+RGB was not added to its valid values. The Detection worker continues to read
+settings["color_channel"], use SampleResult.concentration_for(color_channel),
+and render Con.R, Con.G, or Con.B through the existing formal path.
+
+The pure merge_settings_overrides function owns backward compatibility:
+
+- if an old overrides document lacks linear_plot_channel, the validated load
+  snapshot inherits its R/G/B color_channel value;
+- loading this legacy document performs no write;
+- an explicitly present but invalid linear_plot_channel falls back to B without
+  changing a valid Detection color_channel;
+- other schema validation and unknown-field handling remain unchanged.
+
+save_settings remains the only Interface Settings persistence path and retains
+QSaveFile atomic publication outside the project tree. Clicking OK validates
+and saves both keys together. Clicking Cancel neither saves nor changes either
+runtime channel. The existing Settings saved message remains.
+
+3. Runtime integration and independence
+
+DetectMain retains one Linear Plot runtime authority:
+
+self._linear_plot_channel_mode
+
+Its construction snapshot now reads initial_settings["linear_plot_channel"],
+with B as the defensive failure fallback. It no longer normally initializes
+from Detection color_channel.
+
+The strict _set_linear_plot_channel_mode method:
+
+- accepts only exact R/G/B/RGB strings;
+- writes no setting or file;
+- reads no QAction state;
+- changes no Detection setting;
+- redraws exactly once when an active RegressionSet exists;
+- redraws zero times when no active RegressionSet exists;
+- reads no clock and changes no Linear or Detection time;
+- triggers no regression, detection, worker, model, or Camera path.
+
+InterfaceSettingsDialog exposes only its final validated and successfully saved
+settings snapshot. DetectWindow calls the Plot setter once, and only after the
+dialog returns Accepted. Detection color_channel remains handled by the
+existing saved-settings/worker load path and is never passed to the Plot setter.
+
+Projection, renderer, Detection overlays, calibration and detection revision
+gates, selected image order, Save Linear current-view behavior, XLSX schemas,
+transactions, callbacks, numbering, concentrations, timing, worker, model, and
+Camera code were not modified.
+
+4. Modified and added files
+
+MODIFIED:
+
+- detectmain.py
+  before: bytes=161563
+  before UTC mtime=2026-09-26T14:50:20.7904532Z
+  before SHA-256=42f10758b94a597956e801189f70041027076118af69450e0d8c3cf15d2a5928
+  after: bytes=161035
+  after UTC mtime=2026-09-26T15:36:02.1545309Z
+  after SHA-256=7525c96396568ba743b71429198ae04c0bc4da5192bf7f00acbcd6fdfce52ae3
+
+- detectionwindow.py
+  before: bytes=37326
+  before UTC mtime=2026-09-26T14:50:44.0932482Z
+  before SHA-256=0c9708cda7de56dac5ad3660cfb006f83d192cf3eb25a6fe5cfd4f9956a50a52
+  after: bytes=35752
+  after UTC mtime=2026-09-26T15:36:03.4295830Z
+  after SHA-256=63256975f23a75776ebc1682b6bf3f5afd466a649ee887b93486d77a5f7da25a
+
+- interface_config.py
+  before: bytes=13469
+  before UTC mtime=2026-09-12T05:02:36.9080047Z
+  before SHA-256=da3ec173f7b2741a13c6bd0826a1024b29adfe252fdf73651415ac395870704a
+  after: bytes=14132
+  after UTC mtime=2026-09-26T15:35:59.5596340Z
+  after SHA-256=f14de7c23a8be0040387afb3c1abb26317634b70f2bc14edf3ea4010780646d9
+
+- interface_settings_dialog.py
+  before: bytes=11398
+  before UTC mtime=2026-09-01T08:02:44.8294496Z
+  before SHA-256=2c4485a1f3b0a41262a80f288bd1ea31f165a748aa562b764450e0d3371c7fea
+  after: bytes=11970
+  after UTC mtime=2026-09-26T15:36:00.8921135Z
+  after SHA-256=3a332a0f4cf1f2a70f57f4ce3e98eab093c93f7454e12d3968db37debad7514a
+
+- tests/test_phase1c2_plot_integration.py
+  before: bytes=21933
+  before UTC mtime=2026-09-26T14:57:12.8216373Z
+  before SHA-256=88fad32446be805d900187a8a87b7b1fe312cd456d9107be4e0e4b239cb4c6a9
+  after: bytes=22645
+  after UTC mtime=2026-09-26T15:42:19.8320451Z
+  after SHA-256=f7a897c199e455b0cd71283947fa0c138c2476615f34479a10bc6cf9bc30aa29
+
+ADDED:
+
+- tests/test_phase1c2_repair1_plot_setting_location.py
+  before: absent
+  after: bytes=22502
+  after UTC mtime=2026-09-26T15:43:10.6957019Z
+  after SHA-256=d6c6839679c59334c3400d0bdcec9491cedc2c9bba19fbda6cdeef4ed29ec5ca
+
+AUTHORIZED_HANDOFF_ARTIFACT:
+
+- PHASE1C2_REPAIR1_IMPLEMENTATION_REPORT.txt
+
+No other project path changed.
+
+5. Replaced Phase 1C2 nodes
+
+Eight obsolete menu-design nodes were replaced one-for-one:
+
+MAP_1_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_menu_hierarchy_is_edit_linear_plot_channel
+MAP_1_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_channel_menu_is_removed_from_detectionwindow
+MAP_2_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_channel_action_group_is_exclusive
+MAP_2_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_settings_places_plot_channel_below_detection_channel
+MAP_3_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_all_four_plot_channel_actions_are_checkable
+MAP_3_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_setting_selectors_have_distinct_fixed_choices
+MAP_4_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_action_checked_state_is_only_a_mirror
+MAP_4_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_dialog_collects_distinct_channel_keys
+MAP_5_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_setter_synchronizes_actions_and_redraws_only_with_active_regression
+MAP_5_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_setter_redraws_only_with_active_regression
+MAP_6_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_initial_mode_is_one_time_detection_setting_snapshot_with_b_fallback
+MAP_6_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_initial_mode_reads_linear_plot_setting_with_b_fallback
+MAP_7_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_menu_redraw_paths_do_not_read_clocks
+MAP_7_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_setting_redraw_paths_do_not_read_clocks
+MAP_8_OLD = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_menu_redraw_paths_emit_no_worker_signal
+MAP_8_NEW = tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_setting_redraw_paths_emit_no_worker_signal
+
+RETAINED_ORIGINAL_NODE_COUNT = 94
+LEGAL_REPLACEMENT_NODE_COUNT = 8
+REPAIR1_NEW_NODE_COUNT = 31
+FINAL_NODE_COUNT = 133
+FINAL_UNIQUE_NODE_COUNT = 133
+FINAL_DUPLICATE_NODE_COUNT = 0
+FINAL_MISSING_NODE_COUNT = 0
+
+6. Development failure record
+
+INITIAL_REPAIR1_NEW_TEST_RUN:
+- exact nodes: 31
+- passed: 30
+- failed: 1
+- errors: 0
+- skipped: 0
+
+FAILED_NODE:
+tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_18_detection_channel_retains_formal_worker_path
+
+CAUSE:
+The test expected a display-format source string with one replacement field after
+the colon. Production correctly contains two fields, Con.{channel}:{value}.
+The failure was in the test literal, not in production behavior.
+
+FIX:
+The expected source string was corrected from "Con.{}:" to "Con.{}:{}". The
+exact failed node then passed, and the full 31-node Repair 1 set passed 31/31.
+
+7. AST and authoritative test result
+
+Python executable: project .venv/Scripts/python.exe
+Flags/environment: python -B; PYTHONDONTWRITEBYTECODE=1
+
+FINAL_AST_OK detectmain.py
+FINAL_AST_OK detectionwindow.py
+FINAL_AST_OK interface_config.py
+FINAL_AST_OK interface_settings_dialog.py
+FINAL_AST_OK tests/test_phase1c2_plot_integration.py
+FINAL_AST_OK tests/test_phase1c2_repair1_plot_setting_location.py
+FINAL_AST_ERROR_COUNT = 0
+
+The authoritative run used the exact node list below, in order, without unittest
+discovery or pytest. No GUI module was imported by the new tests, and no Qt,
+DetectMain, InterfaceSettingsDialog, worker, model, Camera, or canvas object was
+created.
+
+FINAL_TEST_PASS_COUNT = 133
+FINAL_TEST_FAIL_COUNT = 0
+FINAL_TEST_ERROR_COUNT = 0
+FINAL_TEST_SKIP_COUNT = 0
+FINAL_AUTHORITATIVE_TEST_RESULT = PASS
+
+Final exact node IDs in execution order:
+1. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_revision_mismatch_rejects_only_standard_points
+2. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_sample_is_frozen_and_normalizes_finite_values
+3. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_calibration_source_list_and_dict_mutation_cannot_change_projection
+4. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_curve_formula_r_squared_range_and_status_come_from_active_set
+5. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_failed_and_empty_completed_images_do_not_create_points
+6. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_invalid_plot_modes_are_rejected
+7. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_missing_selected_order_does_not_fall_back_to_current_index
+8. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_modes_have_exact_fixed_curve_order
+9. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_none_nan_and_infinite_values_do_not_generate_points
+10. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_numbering_mode_and_stored_numbers_are_copied_not_reassigned
+11. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_only_included_calibration_samples_become_channel_points
+12. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_plottable_statuses_are_preserved_without_reclassification
+13. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_projection_and_nested_values_are_frozen_tuples
+14. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_rgb_points_use_exact_channel_coordinates_and_shared_identity
+15. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_same_filename_and_repeated_path_are_distinguished_by_image_order
+16. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_single_channel_mode_never_projects_other_channels
+17. tests.test_linear_plot_projection.LinearPlotProjectionTests.test_unplottable_channel_does_not_suppress_other_channels
+18. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_builder_never_calls_formula_or_number_assignment_helpers
+19. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_calibration_and_detection_revision_gates_are_independent
+20. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_matching_batch_is_not_stale
+21. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_empty_mismatched_batch_records_the_real_revision_conflict
+22. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_legacy_targets_and_display_pollution_are_never_read
+23. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_matching_revision_projects_every_completed_formal_sample
+24. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_missing_and_invalid_regression_statuses_are_copied_to_curves
+25. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_contains_no_io_clock_worker_gui_or_model_calls
+26. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_module_direct_imports_stay_within_pure_allowlist
+27. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_no_batch_has_no_detection_revision_and_is_not_stale
+28. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_construction_does_not_mutate_batch_or_samples
+29. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_projection_is_detached_from_later_batch_mutation
+30. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_never_recalculates_old_detection_points
+31. tests.test_linear_plot_lifecycle.LinearPlotLifecycleTests.test_revision_mismatch_suppresses_detection_points_and_marks_stale
+32. tests.test_batch_state.CompatibilityTests.test_legacy_single_image_target_fields_are_unchanged
+33. tests.test_batch_state.NaturalSortTests.test_batch_state_factory
+34. tests.test_batch_state.NaturalSortTests.test_case_extension_directories_and_duplicates_are_deterministic
+35. tests.test_batch_state.NaturalSortTests.test_current_image_index_contract
+36. tests.test_batch_state.NaturalSortTests.test_empty_and_single
+37. tests.test_batch_state.NaturalSortTests.test_empty_batch_index_and_current_image
+38. tests.test_batch_state.NaturalSortTests.test_invalid_constructor_index_and_list_mutation
+39. tests.test_batch_state.NaturalSortTests.test_natural_order_and_image_order
+40. tests.test_batch_state.NaturalSortTests.test_original_filename_is_not_modified
+41. tests.test_batch_state.NumberingTests.test_assign_image_numbers_is_spatial
+42. tests.test_batch_state.NumberingTests.test_failed_image_does_not_consume_batch_number
+43. tests.test_batch_state.NumberingTests.test_failed_stale_sample_is_cleared_without_batch_gap
+44. tests.test_batch_state.NumberingTests.test_per_image_resets_and_batch_continues
+45. tests.test_batch_state.NumberingTests.test_valid_error_valid_numbers_only_valid_samples
+46. tests.test_batch_state.PairingTests.test_all_input_permutations_have_identical_complete_result
+47. tests.test_batch_state.PairingTests.test_horizontal_overlap_fallback_can_pair_uniquely
+48. tests.test_batch_state.PairingTests.test_multiple_candidates_are_ambiguous_not_forced
+49. tests.test_batch_state.PairingTests.test_no_candidate_records_both_unmatched_targets
+50. tests.test_batch_state.PairingTests.test_unique_center_containment_pair
+51. tests.test_batch_state.RegressionSetTests.test_all_eight_statuses_have_fixed_semantics
+52. tests.test_batch_state.RegressionSetTests.test_mixed_confirmed_sources_are_rejected
+53. tests.test_batch_state.RegressionSetTests.test_three_distinct_equations_and_inclusive_boundaries
+54. tests.test_batch_state.SpatialSortTests.test_single_row_left_to_right
+55. tests.test_batch_state.SpatialSortTests.test_two_rows_top_then_bottom_and_shuffled_input
+56. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_single_channel_modes_draw_only_the_selected_channel
+57. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_rgb_uses_fixed_red_green_blue_order
+58. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_three_distinct_formulas_do_not_cross_channels
+59. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_calibration_point_coordinates_are_exact
+60. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_point_coordinates_are_exact
+61. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_calibration_and_detection_markers_are_distinct
+62. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_rgb_uses_fixed_channel_colors_for_every_artist
+63. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_detection_legend_entry_is_not_repeated_per_point
+64. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_fit_legend_contains_projection_equation_and_r_squared
+65. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_unavailable_channel_does_not_stop_other_channels
+66. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_no_detection_points_still_draws_the_curve
+67. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_stale_projection_never_renders_old_detection_points
+68. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_range_unavailable_detection_point_remains_renderable
+69. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_does_not_modify_projection
+70. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_imports_only_projection_and_standard_library
+71. tests.test_phase1c2_linear_plot_renderer.LinearPlotRendererTests.test_renderer_never_draws_canvas_or_saves_files
+72. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_linear_plot_channel_has_one_runtime_authority_field
+73. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_only_exact_r_g_b_rgb_modes_are_accepted
+74. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_channel_menu_is_removed_from_detectionwindow
+75. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_settings_places_plot_channel_below_detection_channel
+76. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_setting_selectors_have_distinct_fixed_choices
+77. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_dialog_collects_distinct_channel_keys
+78. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_setter_redraws_only_with_active_regression
+79. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_mode_never_writes_detection_color_channel_setting
+80. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_interface_color_channel_cannot_write_linear_plot_mode
+81. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_initial_mode_reads_linear_plot_setting_with_b_fallback
+82. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_reads_active_regression_set_directly
+83. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_never_reads_regression_result_formulas
+84. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_calibration_revision_gate_rejects_missing_and_stale_samples
+85. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_projection_builder_receives_only_authoritative_inputs
+86. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_detection_points_source_is_controller_batch_state
+87. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_selected_image_order_comes_only_from_formal_selection_key
+88. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_setting_redraw_paths_do_not_read_clocks
+89. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_and_setting_redraw_paths_emit_no_worker_signal
+90. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_does_not_load_models
+91. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_plot_path_does_not_call_formula_file_loader
+92. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_save_linear_reuses_current_plot_renderer_before_print_png
+93. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_save_transactions_xlsx_callbacks_and_time_functions_are_unchanged
+94. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_linear_and_detection_xlsx_schema_functions_are_unchanged
+95. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_both_gui_result_tables_keep_five_columns
+96. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_shared_time_display_structure_is_unchanged
+97. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_reads_demo_xlsx
+98. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_builds_demo_regression_set
+99. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_constructor_no_longer_calculates_demo_concentrations
+100. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_ui_and_generated_ui_files_are_unchanged
+101. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_phase1c1_core_files_are_unchanged
+102. tests.test_phase1c2_plot_integration.Phase1C2PlotIntegrationTests.test_new_tests_do_not_import_or_create_qt_gui_objects
+103. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_01_detectionwindow_has_no_plot_channel_submenu
+104. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_02_plot_action_group_is_removed
+105. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_03_plot_actions_are_removed
+106. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_04_linear_numbering_menu_is_retained
+107. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_05_detection_color_channel_label_exists
+108. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_06_detection_selector_is_exact_r_g_b
+109. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_07_plot_channel_row_immediately_follows_detection_channel
+110. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_08_plot_selector_is_exact_r_g_b_rgb
+111. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_09_selectors_use_distinct_configuration_keys
+112. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_10_legacy_config_migrates_from_valid_detection_channel
+113. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_11_legacy_migration_has_no_write_path
+114. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_12_invalid_plot_channel_falls_back_to_b
+115. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_13_detection_color_channel_still_rejects_rgb
+116. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_14_restore_defaults_resets_both_channels
+117. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_15_cancel_changes_no_runtime_channel_and_does_not_redraw
+118. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_16_ok_collects_two_independent_channel_values
+119. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_17_ok_passes_only_plot_setting_to_runtime_plot_setter
+120. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_18_detection_channel_retains_formal_worker_path
+121. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_19_plot_setter_does_not_write_detection_setting
+122. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_20_plot_setter_has_no_configuration_write
+123. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_21_active_regression_causes_exactly_one_redraw
+124. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_22_missing_active_regression_causes_no_redraw
+125. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_23_plot_setting_update_does_not_read_clock
+126. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_24_plot_setting_update_runs_no_worker_model_or_detection
+127. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_25_projection_and_renderer_hashes_are_unchanged
+128. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_26_save_linear_current_view_path_is_unchanged
+129. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_27_both_result_tables_still_have_five_columns
+130. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_28_ui_and_generated_ui_files_are_unchanged
+131. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_29_new_test_creates_no_qt_or_gui_object
+132. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_30_project_has_only_one_plot_channel_control
+133. tests.test_phase1c2_repair1_plot_setting_location.Repair1PlotSettingLocationTests.test_31_new_install_plot_channel_default_is_b
+
+8. Protected identities
+
+- linear_plot_projection.py
+  bytes=14596
+  SHA-256=7c6e3c88e99bc909244bc4f7f755485045d3bceae913570ea752efbc3067852a
+- linear_plot_renderer.py
+  bytes=4696
+  SHA-256=14cf288b827a7413b9c8f6c8d8517343249c547fd2d1bcd47d06031133e45969
+- tests/test_linear_plot_projection.py
+  bytes=15294
+  SHA-256=f9f6b0352bf5e4217d7b401c5f8420c697140cff667a728471d2ba391f6af3bc
+- tests/test_linear_plot_lifecycle.py
+  bytes=13628
+  SHA-256=34004ce21dd690af207d567ea3b1797f198bd4682e09fca3fbdc9a8e3bebad6f
+- tests/test_phase1c2_linear_plot_renderer.py
+  bytes=10729
+  SHA-256=17191655cdc7a69f6fed99bb19f5a0081f0b36e0c4ac19941bea31b53fde48ea
+- PHASE1C1_CORE_IMPLEMENTATION_REPORT.txt
+  bytes=14189
+  SHA-256=dec1887c66cd703bf5ffb2e322839486fbaaa18082b453c5b47aff1d10ec35fb
+- PHASE1C2_IMPLEMENTATION_REPORT.txt
+  bytes=26967
+  SHA-256=aea82e9052e566f8df224ecb954f1583868a485e976bb73eb12e76f8b5254f1f
+
+The four .ui/generated UI identities also remain unchanged:
+- ui/detectmain.ui: cb533b3586f3c8c3e578a4340bffe11bec94091e2e59542d24e6757679648cf4
+- ui/ui_detectmain.py: e342f9c59348e64ce6676ffd52c78e85745be5c0d90b95fa08b7d34ca62ecc29
+- ui/detectwindow.ui: 58d77e803990e191cc3831a7533a80b0dba7c0249258638a4d7524df2f7a4b42
+- ui/ui_detectwindow.py: 8550c0a4710d1919e6e0dcecfd9d67515593438973efb91eedf623ce01159f08
+
+9. File format
+
+- detectmain.py: UTF-8 without BOM; CRLF only; CRLF=3681; one final newline.
+- detectionwindow.py: UTF-8 without BOM; mixed endings preserved; CRLF=592,
+  bare LF=277. The authorized old Plot Channel block was removed without
+  whole-file normalization.
+- interface_config.py: UTF-8 without BOM; existing mixed form retained;
+  CRLF=280, bare LF=68; final LF.
+- interface_settings_dialog.py: UTF-8 without BOM; CRLF only; CRLF=303;
+  one final newline.
+- tests/test_phase1c2_plot_integration.py: UTF-8 without BOM; CRLF only;
+  CRLF=476; one final newline.
+- tests/test_phase1c2_repair1_plot_setting_location.py: UTF-8 without BOM;
+  LF only; bare LF=578; one final newline.
+
+10. Integrity before the handoff report
+
+BASELINE:
+- non-.git files: 37547
+- first-party Python files: 46
+- .pyc files: 9818
+- PNG files: 1373
+- XLSX files: 56
+- .pytest_cache directories: 0
+- transaction directories: 0
+- full manifest SHA-256:
+  e9061e9c24015ad1780276e194abb90b340fd662403c04591c5fc95ec39583c6
+
+POST_IMPLEMENTATION_BEFORE_HANDOFF_REPORT:
+- non-.git files: 37548
+- first-party Python files: 47
+- .pyc files: 9818
+- PNG files: 1373
+- XLSX files: 56
+- .pytest_cache directories: 0
+- transaction directories: 0
+- full manifest SHA-256:
+  66312401fda6c4beefdba5ef2d2844f209396e0b33d6efb882c4f428a5e661e1
+
+Replacing the five modified paths with their recorded pre-implementation
+path/size/UTC-mtime/SHA entries and excluding the one new test reconstructs:
+
+RECONSTRUCTED_BASELINE_MANIFEST_SHA256 =
+e9061e9c24015ad1780276e194abb90b340fd662403c04591c5fc95ec39583c6
+
+RECONSTRUCTED_BASELINE_MATCH = YES
+UNAUTHORIZED_FILE_CHANGE_COUNT = 0
+
+The handoff report adds one authorized non-business file after this snapshot.
+Its final bytes and SHA-256 are reported in the delivery response because they
+cannot be embedded in the report itself without self-reference.
+
+11. Model identities
+
+- weights/cuvette_Peng/yolov8n_train/weights/best.pt
+  bytes=6279129
+  SHA-256=582a0f22c8fcc4ed5623d7e6e87069c8c6e38a7bc3199fc94590de90fb333e31
+- YOLO_Detection_Core/weights/cuvette_huili/yolov8n_train/weights/best.pt
+  bytes=6281497
+  SHA-256=ebfb9c0ef8c6d758ecf063831df7fdb8fc81abc0622450cc49bed93698b51f2a
+
+12. Prohibited execution and object counters
+
+GIT_COMMANDS_EXECUTED = 0
+NETWORK_OPERATIONS = 0
+QAPPLICATION_CREATED = 0
+QWIDGET_CREATED = 0
+QTHREAD_CREATED = 0
+DETECTMAIN_CREATED = 0
+INTERFACE_SETTINGS_DIALOG_CREATED = 0
+YOLO_WORKER_CREATED = 0
+FIGURE_CANVAS_CREATED = 0
+OFFSCREEN_GUI_EXECUTED = 0
+VISIBLE_GUI_EXECUTED = 0
+MAIN_PROGRAM_RUNS = 0
+MODEL_LOADS = 0
+MODEL_INFERENCES = 0
+CAMERA_ACCESSES = 0
+UNITTEST_DISCOVERY_RUNS = 0
+PYTEST_RUNS = 0
+QUAL7_RUNS = 0
+
+13. Completion boundary
+
+PHASE1C2_REPAIR1_IMPLEMENTATION = PASS
+PHASE1C_CURRENT_STATE = BLOCKED_PENDING_PHASE1C2_REPAIR1_REVIEW
+MANUAL_VALIDATION_ALLOWED = NO
+
+NEXT_REQUIRED_STEP = In a new Codex conversation, perform the Phase 1C2 Repair 1 independent read-only review.
+
+The software was not started. Manual validation and Phase 1C items 17-22 remain
+blocked until the independent Repair 1 review explicitly authorizes them.
